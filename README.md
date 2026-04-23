@@ -58,9 +58,10 @@ Evaluation performed on **TinyStories-v2** and **IITB Hindi Corpus** with a cont
 
 | Metric | Baseline (Token-Byte) | **CAST-G (Production)** |
 | :--- | :--- | :--- |
-| **Inference Speed** | 134,596 B/s | **627,508 B/s** ⭐ |
+| **English Throughput** | 134,596 B/s | **627,508 B/s** ⭐ |
+| **Hindi Throughput** | 134,409 B/s | **469,231 B/s** ⭐ |
 | **Compression Ratio** | 1.00x | **8.02x** ⭐ |
-| **Logic Density** | Standard | **Jagged-Efficient** |
+| **Hindi Logic** | Collapsed (Byte-Noise) | **Stable (Semantic)** ⭐ |
 | **Token Blindness** | High (Brittle) | **Zero (Universal)** |
 
 ---
