@@ -21,6 +21,7 @@ class CASTGModel(nn.Module):
         self.decoder = ByteDecoder(d_model)
         
         self.lagrangian = LagrangianLoss(target_len=8.0)
+        self.step_count = 0 # Track steps for annealing
         
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None):
         # 1. Byte Encoding (O(N) recurrence)
@@ -66,12 +67,18 @@ class CASTGModel(nn.Module):
             # B. Lagrangian Constraint (Segment Length Stability)
             l_penalty, avg_len = self.lagrangian(boundaries, idx.size(1))
             
-            # C. Importance Penalty (Encourage Sparsity in Dynamic Stride)
-            # Penalize the model for using too many Transformer steps
+            # C. Dynamic Entropy Annealing (The 'Showcase' Stability Fix)
+            anneal_factor = max(0.0, 1.0 - (self.step_count / 5000))
+            p = torch.sigmoid(self.boundary_detector.proj(h_bytes))
+            entropy = -p * torch.log(p + 1e-8) - (1-p) * torch.log(1-p + 1e-8)
+            loss_entropy = -0.05 * anneal_factor * entropy.mean() 
+            
+            # D. Sparsity Penalty (Encourages Dynamic Stride efficiency)
             loss_sparsity = importance_gate.mean() * 0.05
             
-            # Joint Objective: Prioritize reconstruction (spelling) in early training
-            loss = (5.0 * loss_recon) + l_penalty + loss_sparsity
+            # Joint Objective
+            loss = (5.0 * loss_recon) + l_penalty + loss_sparsity + loss_entropy
+            self.step_count += 1
             
             metrics['avg_seg_len'] = avg_len
             metrics['importance_sparsity'] = 1.0 - importance_gate.mean().item()
