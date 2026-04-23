@@ -45,7 +45,7 @@ def train(lang_name, data_path, steps):
     
     # Initialize both models
     cast_model = CASTGModel(d_model=256, n_layer=4, n_head=8).to(device)
-    base_model = TokenModel(vocab_size=256, d_model=256, n_layer=4, n_head=8).to(device)
+    base_model = TokenModel(vocab_size=256, d_model=256, n_layer=4, n_head=8, block_size=1024).to(device)
     
     with open(data_path, "r", encoding="utf-8") as f:
         text = f.read()
@@ -65,7 +65,7 @@ def run_loop(model, data, steps, device, save_path, show_seg=False):
     scaler = torch.amp.GradScaler('cuda')
     
     for step in range(steps):
-        xb, yb = get_batch(data, batch_size=32, block_size=256)
+        xb, yb = get_batch(data, batch_size=32, block_size=1024)
         xb, yb = xb.to(device), yb.to(device)
         
         with torch.amp.autocast('cuda'):
