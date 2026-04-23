@@ -17,8 +17,9 @@ class CASTGModel(nn.Module):
         self.encoder = ByteEncoder(d_model)
         self.boundary_detector = BoundaryDetector(d_model)
         self.global_stack = JaggedTransformer(d_model, n_head, n_layer)
-        self.rvq = RVQRefiner(d_model)
         self.decoder = ByteDecoder(d_model)
+        # Weight Tying: Tie decoder projection to input embeddings
+        self.decoder.proj.weight = self.encoder.embed.weight
         
         self.lagrangian = LagrangianLoss(target_len=8.0)
         self.step_count = 0 # Track steps for annealing
@@ -36,11 +37,8 @@ class CASTGModel(nn.Module):
         # 4. Global Transformer Reasoning with Dynamic Stride
         h_global, importance_gate = self.global_stack(z_continuous)
         
-        # 5. RVQ Snapping (Error correction)
-        z_snapped, _ = self.rvq(h_global)
-        
-        # 6. Byte Decoding
-        logits = self.decoder(z_snapped)
+        # 4. Byte Decoding (Direct from Transformer output)
+        logits = self.decoder(h_global)
         
         loss = None
         metrics = {}

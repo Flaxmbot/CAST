@@ -21,13 +21,13 @@ CONFIG = {
 
 def load_data(lang="en"):
     if lang == "hi":
-        print(">>> LOADING HINDI DATASET (AI4Bharat Sample)...")
+        print(">>> LOADING PRODUCTION HINDI DATASET...")
+        path = "data_hi.txt"
         url = "https://raw.githubusercontent.com/AI4Bharat/indicnlp_corpus/master/sample/hi.txt"
-        path = "hindi_sample.txt"
     else:
-        print(">>> LOADING ENGLISH DATASET (Tiny Shakespeare)...")
+        print(">>> LOADING PRODUCTION ENGLISH DATASET...")
+        path = "data_en.txt"
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        path = "tinyshakespeare.txt"
         
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -108,7 +108,7 @@ def run_benchmark(name, model, data, lang_code="en"):
     print(f"  Result: {out_bytes.decode('utf-8', errors='replace')}\n", flush=True)
     
     return {
-        'loss': loss.item(),
+        'loss': last_metrics.get('loss_recon', loss.item()), # Use Reconstruction Loss for fair battle
         'throughput': throughput,
         'duration': duration,
         'compression': last_metrics.get('avg_seg_len', 1.0)

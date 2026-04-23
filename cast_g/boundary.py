@@ -38,9 +38,10 @@ class LagrangianLoss:
         
     def __call__(self, boundaries: torch.Tensor, total_bytes: int):
         # boundaries: [B, T]
-        num_segments = boundaries.sum()
-        avg_len = total_bytes / (num_segments + 1e-6)
+        # Calculate average segments per sequence in the batch
+        avg_segments = boundaries.sum() / boundaries.size(0)
+        avg_len = total_bytes / (avg_segments + 1e-6)
         
         # We use a squared penalty for smoother gradients
         penalty = (avg_len - self.target_len)**2
-        return self.lam * penalty, avg_len
+        return self.lam * penalty, avg_len.item()

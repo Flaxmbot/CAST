@@ -45,7 +45,7 @@ class ByteDecoder(nn.Module):
     """
     def __init__(self, d_model: int):
         super().__init__()
-        self.proj = nn.Linear(d_model, 256)
+        self.proj = nn.Linear(d_model, 256, bias=False)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, S, D]
