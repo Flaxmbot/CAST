@@ -76,6 +76,7 @@ def run_benchmark(name, model, data, lang_code="en"):
     
     for i in range(CONFIG['steps']):
         xb, yb = get_batch(data, CONFIG['batch_size'], CONFIG['block_size'])
+        xb, yb = xb.to(device), yb.to(device)
         output = model(xb, yb)
         
         if isinstance(output, tuple) and len(output) == 3:
