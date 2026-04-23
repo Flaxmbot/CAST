@@ -55,7 +55,19 @@ def run_benchmark(name, model, data, lang_code="en"):
     
     if os.path.exists(weight_file):
         print(f">>> [LOADING] Production Weights: {weight_file}")
-        model.load_state_dict(torch.load(weight_file, map_location=device))
+        state_dict = torch.load(weight_file, map_location=device)
+        
+        # SMART PATCH: Handle pos_emb size mismatch
+        if 'pos_emb' in state_dict:
+            curr_pos_emb = model.state_dict()['pos_emb']
+            if state_dict['pos_emb'].shape != curr_pos_emb.shape:
+                print(f"  [PATCH] Adapting pos_emb from {state_dict['pos_emb'].shape[1]} to {curr_pos_emb.shape[1]} slots...")
+                new_pos_emb = torch.zeros_like(curr_pos_emb)
+                n_src = min(state_dict['pos_emb'].shape[1], curr_pos_emb.shape[1])
+                new_pos_emb[:, :n_src, :] = state_dict['pos_emb'][:, :n_src, :]
+                state_dict['pos_emb'] = new_pos_emb
+        
+        model.load_state_dict(state_dict)
     else:
         print(f"⚠️ [WARNING] No weights found for {name}. Using random initialization.")
 
@@ -120,7 +132,7 @@ if __name__ == "__main__":
     
     # Initialize
     cast_g = CASTGModel(d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'])
-    token = TokenModel(vocab_size=256, d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'])
+    token = TokenModel(vocab_size=256, d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'], block_size=CONFIG['block_size'])
     
     c_res = run_benchmark("CAST-G (Modular Hardware-Aware)", cast_g, data, lang_code=args.lang)
     b_res = run_benchmark("Baseline (Discrete)", token, data)

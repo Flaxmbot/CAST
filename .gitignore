@@ -1,2 +1,7 @@
+*.pyc
 __pycache__/
-.venv/
+.ipynb_checkpoints/
+*.pt
+frl_engine/
+data_en.txt
+data_hi.txt
