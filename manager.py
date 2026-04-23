@@ -69,7 +69,12 @@ def run_loop(model, data, steps, device, save_path, show_seg=False):
         xb, yb = xb.to(device), yb.to(device)
         
         with torch.amp.autocast('cuda'):
-            logits, loss, metrics = model(xb, yb)
+            output = model(xb, yb)
+            if isinstance(output, tuple) and len(output) == 3:
+                logits, loss, metrics = output
+            else:
+                logits, loss = output
+                metrics = {}
         
         optimizer.zero_grad()
         scaler.scale(loss).backward()
