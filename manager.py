@@ -26,12 +26,13 @@ def download_data(choice):
             if i > 5000: break
         path = "data_en.txt"
     else:
-        print(">>> Downloading Hindi Wikipedia...")
-        ds = load_dataset("wikipedia", "20220301.hi", split="train", streaming=True)
+        print(">>> Downloading Hindi Stories...")
+        # High-quality cleaned stories for better grammar learning
+        ds = load_dataset("surajp/hindi_stories", split="train", streaming=True)
         text = ""
         for i, item in enumerate(ds):
-            text += item["text"] + "\n"
-            if i > 5000: break
+            text += item["story"] + "\n\n"
+            if i > 2000: break
         path = "data_hi.txt"
     
     with open(path, "w", encoding="utf-8") as f:
@@ -88,8 +89,8 @@ def main():
     if not setup(): return
     
     print("\n--- CAST-G INTERACTIVE MANAGER ---")
-    print("1. Train English (WikiText)")
-    print("2. Train Hindi (Wikipedia)")
+    print("1. Train English (TinyStories)")
+    print("2. Train Hindi (HindiStories)")
     print("3. Run Official Benchmarks")
     print("4. Exit")
     
