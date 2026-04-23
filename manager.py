@@ -17,9 +17,13 @@ def setup():
 
 def download_data(choice):
     if choice == "1":
-        print(">>> Downloading English WikiText-103...")
-        ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
-        text = "\n".join(ds["text"][:10000])
+        print(">>> Downloading English TinyStories...")
+        # TinyStories is much better for byte-level learning
+        ds = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
+        text = ""
+        for i, item in enumerate(ds):
+            text += item["text"] + "\n\n"
+            if i > 5000: break
         path = "data_en.txt"
     else:
         print(">>> Downloading Hindi Wikipedia...")
@@ -49,13 +53,13 @@ def train(lang_name, data_path, steps):
     # 1. TRAIN CAST-G
     lang_code = "en" if lang_name == "English" else "hi"
     print(f"\n🔥 [1/2] TRAINING CAST-G ({lang_name}) for {steps} steps...")
-    run_loop(cast_model, data, steps, device, f"cast_g_{lang_code}_production.pt")
+    run_loop(cast_model, data, steps, device, f"cast_g_{lang_code}_production.pt", show_seg=True)
 
     # 2. TRAIN BASELINE
     print(f"\n🔥 [2/2] TRAINING BASELINE ({lang_name}) for {steps} steps...")
-    run_loop(base_model, data, steps, device, f"baseline_{lang_code}_production.pt")
+    run_loop(base_model, data, steps, device, f"baseline_{lang_code}_production.pt", show_seg=False)
 
-def run_loop(model, data, steps, device, save_path):
+def run_loop(model, data, steps, device, save_path, show_seg=False):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler('cuda')
     
@@ -64,9 +68,7 @@ def run_loop(model, data, steps, device, save_path):
         xb, yb = xb.to(device), yb.to(device)
         
         with torch.amp.autocast('cuda'):
-            # Handle different return signatures
-            output = model(xb, yb)
-            loss = output[1] if isinstance(output, tuple) else output
+            logits, loss, metrics = model(xb, yb)
         
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -75,8 +77,9 @@ def run_loop(model, data, steps, device, save_path):
         scaler.step(optimizer)
         scaler.update()
         
-        if step % 500 == 0:
-            print(f"  Step {step:5d} | Loss: {loss.item():.4f}")
+        if step % 100 == 0:
+            seg_info = f" | Seg: {metrics.get('avg_seg_len', 0.0):.2f} bytes" if show_seg else ""
+            print(f"  Step {step:5d} | Loss: {loss.item():.4f}{seg_info}")
 
     torch.save(model.state_dict(), save_path)
     print(f"✅ Weights saved as {save_path}")

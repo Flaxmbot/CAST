@@ -7,47 +7,34 @@ import argparse
 from cast_g.model import CASTGModel
 from token_model import TokenModel
 
-# --- Configuration (High-Capacity for Showcase) ---
+# --- Configuration (Inference Benchmark) ---
 CONFIG = {
     'd_model': 256, 
     'n_layer': 4,
     'n_head': 8,
-    'block_size': 128,
+    'block_size': 1024, # EXTREME SPEED TEST
     'batch_size': 16,
-    'steps': 5000, 
-    'lr': 5e-4,
-    'load_weights': True # NEW: Automatically load production weights
+    'steps': 100,       # Quick evaluation
+    'load_weights': True
 }
 
 def load_data(lang="en"):
     if lang == "hi":
         print(">>> LOADING PRODUCTION HINDI DATASET...")
         path = "data_hi.txt"
-        url = "https://raw.githubusercontent.com/AI4Bharat/indicnlp_corpus/master/sample/hi.txt"
     else:
         print(">>> LOADING PRODUCTION ENGLISH DATASET...")
         path = "data_en.txt"
-        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
         
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
-            # If the file is just a 404 error, we need to fetch it (or let user know)
-            if text.strip() == "404: Not Found" or len(text) < 100:
-                print(f">>> File {path} was corrupted or 404. Attempting to fetch...")
-                text = requests.get(url).text
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text)
     else:
-        print(f">>> Fetching dataset from {url}...")
-        text = requests.get(url).text
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
+        # Fallback if production file is missing
+        print(f">>> Production file {path} missing. Check manager.py.")
+        text = "This is a fallback string for testing purposes only."
             
     encoded = text.encode('utf-8')
-    if len(encoded) <= CONFIG['block_size']:
-        raise ValueError(f"Dataset too small! Found {len(encoded)} bytes, need at least {CONFIG['block_size'] + 1}.")
-        
     return torch.tensor([b for b in encoded], dtype=torch.long)
 
 def get_batch(data, batch_size, block_size):
@@ -57,48 +44,40 @@ def get_batch(data, batch_size, block_size):
     return x, y
 
 def run_benchmark(name, model, data, lang_code="en"):
-    print(f"\n>>> PERFORMANCE BATTLE: {name}", flush=True)
+    print(f"\n>>> INFERENCE PERFORMANCE BATTLE: {name}", flush=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
+    model.eval() # PURE INFERENCE
     
-    # NEW: Automatic Production Weight Loading
+    # Load Production Weights
     type_str = "cast_g" if "CAST-G" in name else "baseline"
     weight_file = f"{type_str}_{lang_code}_production.pt"
     
-    if CONFIG['load_weights'] and os.path.exists(weight_file):
-        print(f">>> [DETECTED] Loading Production Weights: {weight_file}")
+    if os.path.exists(weight_file):
+        print(f">>> [LOADING] Production Weights: {weight_file}")
         model.load_state_dict(torch.load(weight_file, map_location=device))
-        print(f">>> [SUCCESS] {name} loaded from production training.")
+    else:
+        print(f"⚠️ [WARNING] No weights found for {name}. Using random initialization.")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
-    model.train()
-    
     start_time = time.time()
     last_metrics = {}
     
-    for i in range(CONFIG['steps']):
-        xb, yb = get_batch(data, CONFIG['batch_size'], CONFIG['block_size'])
-        xb, yb = xb.to(device), yb.to(device)
-        output = model(xb, yb)
-        
-        if isinstance(output, tuple) and len(output) == 3:
-            logits, loss, last_metrics = output
-        else:
-            logits, loss = output
-            last_metrics = {}
+    with torch.no_grad():
+        for i in range(CONFIG['steps']):
+            xb, yb = get_batch(data, CONFIG['batch_size'], CONFIG['block_size'])
+            xb, yb = xb.to(device), yb.to(device)
+            output = model(xb, yb)
             
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        if i % 100 == 0:
-            print(f"  Step {i:3} | Loss: {loss.item():.4f}", end="", flush=True)
-            if 'avg_seg_len' in last_metrics:
-                print(f" | Segment Length: {last_metrics['avg_seg_len']:.2f} bytes", end="", flush=True)
-            print(flush=True)
+            if isinstance(output, tuple) and len(output) == 3:
+                logits, loss, last_metrics = output
+            else:
+                logits, loss = output
+                
+            if i % 20 == 0:
+                print(f"  Eval Step {i:3} | Current Loss: {loss.item():.4f}", flush=True)
             
-    end_time = time.time()
-    duration = end_time - start_time
+    duration = time.time() - start_time
+    # Throughput in Bytes Per Second
     throughput = (CONFIG['steps'] * CONFIG['batch_size'] * CONFIG['block_size']) / duration
     
     print(f"\n>>> GENERATION TEST ({name}):")
