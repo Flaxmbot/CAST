@@ -59,13 +59,16 @@ def pool_jagged(h_bytes: torch.Tensor, boundaries: torch.Tensor):
     segment_ids = torch.cumsum(boundaries, dim=1).long()
     max_segments = segment_ids.max().item() + 1
     
-    # Parallel Aggregation (dtype-aware for AMP)
+    # Parallel Aggregation (Strict DType alignment for AMP)
     pooled = torch.zeros(B, max_segments, D, device=device, dtype=h_bytes.dtype)
     counts = torch.zeros(B, max_segments, 1, device=device, dtype=h_bytes.dtype)
     
     idx_expanded = segment_ids.unsqueeze(-1).expand(-1, -1, D)
     pooled.scatter_add_(1, idx_expanded, h_bytes)
-    counts.scatter_add_(1, segment_ids.unsqueeze(-1), torch.ones_like(segment_ids).unsqueeze(-1).float())
+    
+    # Ensure 'ones' matches the dtype of h_bytes exactly
+    ones = torch.ones_like(segment_ids).unsqueeze(-1).to(h_bytes.dtype)
+    counts.scatter_add_(1, segment_ids.unsqueeze(-1), ones)
     
     # Mean pooling result
     return pooled / (counts + 1e-6), counts.squeeze(-1)
