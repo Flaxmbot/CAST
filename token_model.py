@@ -56,6 +56,8 @@ class TokenModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int = 50, temp: float = 0.7):
+        # FIX: Ensure prompt is on the correct device
+        idx = idx.to(next(self.parameters()).device)
         self.eval()
         for _ in range(max_new_tokens):
             # Crop to block size

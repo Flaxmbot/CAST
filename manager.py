@@ -47,12 +47,13 @@ def train(lang_name, data_path, steps):
     data = torch.tensor([b for b in text.encode('utf-8')], dtype=torch.long)
 
     # 1. TRAIN CAST-G
+    lang_code = "en" if lang_name == "English" else "hi"
     print(f"\n🔥 [1/2] TRAINING CAST-G ({lang_name}) for {steps} steps...")
-    run_loop(cast_model, data, steps, device, f"cast_g_{lang_name.lower()}_production.pt")
+    run_loop(cast_model, data, steps, device, f"cast_g_{lang_code}_production.pt")
 
     # 2. TRAIN BASELINE
     print(f"\n🔥 [2/2] TRAINING BASELINE ({lang_name}) for {steps} steps...")
-    run_loop(base_model, data, steps, device, f"baseline_{lang_name.lower()}_production.pt")
+    run_loop(base_model, data, steps, device, f"baseline_{lang_code}_production.pt")
 
 def run_loop(model, data, steps, device, save_path):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
