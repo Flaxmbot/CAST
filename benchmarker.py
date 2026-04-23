@@ -10,7 +10,7 @@ from token_model import TokenModel
 # --- Configuration (High-Capacity for Showcase) ---
 CONFIG = {
     'd_model': 256, 
-    'n_layer': 3,
+    'n_layer': 4,
     'n_head': 8,
     'block_size': 128,
     'batch_size': 16,
