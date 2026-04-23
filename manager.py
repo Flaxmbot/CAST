@@ -26,13 +26,21 @@ def download_data(choice):
             if i > 5000: break
         path = "data_en.txt"
     else:
-        print(">>> Downloading Hindi Stories...")
-        # High-quality cleaned stories for better grammar learning
-        ds = load_dataset("surajp/hindi_stories", split="train", streaming=True)
-        text = ""
-        for i, item in enumerate(ds):
-            text += item["story"] + "\n\n"
-            if i > 2000: break
+        print(">>> Downloading Hindi Professional Corpus (AI4Bharat)...")
+        # High-quality clean Hindi dataset from IIT Madras/AI4Bharat
+        try:
+            ds = load_dataset("ai4bharat/indic_nlp_corpus", "hi", split="train", streaming=True)
+            text = ""
+            for i, item in enumerate(ds):
+                text += item["text"] + "\n\n"
+                if i > 3000: break
+        except Exception as e:
+            print(f"⚠️ AI4Bharat failed, falling back to clean Wikipedia... Error: {e}")
+            ds = load_dataset("wikipedia", "20220301.hi", split="train", streaming=True)
+            text = ""
+            for i, item in enumerate(ds):
+                text += item["text"] + "\n"
+                if i > 3000: break
         path = "data_hi.txt"
     
     with open(path, "w", encoding="utf-8") as f:
