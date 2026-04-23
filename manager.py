@@ -36,32 +36,49 @@ def download_data(choice):
 
 def train(lang_name, data_path, steps):
     device = 'cuda'
-    model = CASTGModel(d_model=256, n_layer=4, n_head=8).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    scaler = torch.amp.GradScaler('cuda')
+    from token_model import TokenModel
+    
+    # Initialize both models
+    cast_model = CASTGModel(d_model=256, n_layer=4, n_head=8).to(device)
+    base_model = TokenModel(vocab_size=256, d_model=256, n_layer=4, n_head=8).to(device)
     
     with open(data_path, "r", encoding="utf-8") as f:
         text = f.read()
     data = torch.tensor([b for b in text.encode('utf-8')], dtype=torch.long)
 
-    print(f"\n🔥 TRAINING {lang_name} for {steps} steps...")
+    # 1. TRAIN CAST-G
+    print(f"\n🔥 [1/2] TRAINING CAST-G ({lang_name}) for {steps} steps...")
+    run_loop(cast_model, data, steps, device, f"cast_g_{lang_name.lower()}_production.pt")
+
+    # 2. TRAIN BASELINE
+    print(f"\n🔥 [2/2] TRAINING BASELINE ({lang_name}) for {steps} steps...")
+    run_loop(base_model, data, steps, device, f"baseline_{lang_name.lower()}_production.pt")
+
+def run_loop(model, data, steps, device, save_path):
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scaler = torch.amp.GradScaler('cuda')
+    
     for step in range(steps):
         xb, yb = get_batch(data, batch_size=32, block_size=256)
         xb, yb = xb.to(device), yb.to(device)
         
         with torch.amp.autocast('cuda'):
-            logits, loss, metrics = model(xb, yb)
+            # Handle different return signatures
+            output = model(xb, yb)
+            loss = output[1] if isinstance(output, tuple) else output
         
         optimizer.zero_grad()
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
         
         if step % 500 == 0:
-            print(f"Step {step:5d} | Loss: {loss.item():.4f} | SegLen: {metrics['avg_seg_len']:.2f}")
+            print(f"  Step {step:5d} | Loss: {loss.item():.4f}")
 
-    torch.save(model.state_dict(), f"cast_g_{lang_name.lower()}_production.pt")
-    print(f"✅ Weights saved as cast_g_{lang_name.lower()}_production.pt")
+    torch.save(model.state_dict(), save_path)
+    print(f"✅ Weights saved as {save_path}")
 
 def main():
     if not setup(): return

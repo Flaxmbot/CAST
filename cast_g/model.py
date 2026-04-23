@@ -70,8 +70,9 @@ class CASTGModel(nn.Module):
             # C. Dynamic Entropy Annealing (The 'Showcase' Stability Fix)
             anneal_factor = max(0.0, 1.0 - (self.step_count / 5000))
             p = torch.sigmoid(self.boundary_detector.proj(h_bytes))
-            entropy = -p * torch.log(p + 1e-8) - (1-p) * torch.log(1-p + 1e-8)
-            loss_entropy = -0.05 * anneal_factor * entropy.mean() 
+            p = p.clamp(1e-6, 1.0 - 1e-6) # Clamp for numerical stability
+            entropy = -p * torch.log(p) - (1-p) * torch.log(1-p)
+            loss_entropy = -0.05 * anneal_factor * entropy.mean()
             
             # D. Sparsity Penalty (Encourages Dynamic Stride efficiency)
             loss_sparsity = importance_gate.mean() * 0.05

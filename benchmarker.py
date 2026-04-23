@@ -62,11 +62,13 @@ def run_benchmark(name, model, data, lang_code="en"):
     model = model.to(device)
     
     # NEW: Automatic Production Weight Loading
-    weight_file = f"cast_g_{lang_code}_production.pt"
-    if "CAST-G" in name and CONFIG['load_weights'] and os.path.exists(weight_file):
+    type_str = "cast_g" if "CAST-G" in name else "baseline"
+    weight_file = f"{type_str}_{lang_code}_production.pt"
+    
+    if CONFIG['load_weights'] and os.path.exists(weight_file):
         print(f">>> [DETECTED] Loading Production Weights: {weight_file}")
         model.load_state_dict(torch.load(weight_file, map_location=device))
-        print(">>> [SUCCESS] Continuing from production training.")
+        print(f">>> [SUCCESS] {name} loaded from production training.")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
     model.train()
