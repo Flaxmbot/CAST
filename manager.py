@@ -26,21 +26,23 @@ def download_data(choice):
             if i > 5000: break
         path = "data_en.txt"
     else:
-        print(">>> Downloading Hindi Professional Corpus (AI4Bharat)...")
-        # High-quality clean Hindi dataset from IIT Madras/AI4Bharat
+        print(">>> Downloading Hindi Professional Corpus (IIT-B)...")
+        # Modern Parquet-based dataset (Highly Stable)
         try:
-            ds = load_dataset("ai4bharat/indic_nlp_corpus", "hi", split="train", streaming=True)
+            ds = load_dataset("cfilt/iitb-english-hindi", split="train", streaming=True)
             text = ""
             for i, item in enumerate(ds):
-                text += item["text"] + "\n\n"
-                if i > 3000: break
+                # This dataset is parallel, we only need the hindi side
+                text += item["hindi"] + "\n\n"
+                if i > 5000: break
         except Exception as e:
-            print(f"⚠️ AI4Bharat failed, falling back to clean Wikipedia... Error: {e}")
-            ds = load_dataset("wikipedia", "20220301.hi", split="train", streaming=True)
+            print(f"⚠️ IIT-B failed, using a high-reliability fallback... Error: {e}")
+            # This is a very stable backup for Hindi
+            ds = load_dataset("miracl/miracl", "hi", split="train", streaming=True)
             text = ""
             for i, item in enumerate(ds):
                 text += item["text"] + "\n"
-                if i > 3000: break
+                if i > 2000: break
         path = "data_hi.txt"
     
     with open(path, "w", encoding="utf-8") as f:
