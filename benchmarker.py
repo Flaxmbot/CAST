@@ -14,8 +14,9 @@ CONFIG = {
     'n_head': 8,
     'block_size': 128,
     'batch_size': 16,
-    'steps': 5000, # Set to 500 for a quick but meaningful demo
-    'lr': 5e-4
+    'steps': 5000, 
+    'lr': 5e-4,
+    'load_weights': True # NEW: Automatically load production weights
 }
 
 def load_data(lang="en"):
@@ -55,8 +56,18 @@ def get_batch(data, batch_size, block_size):
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
-def run_benchmark(name, model, data):
+def run_benchmark(name, model, data, lang_code="en"):
     print(f"\n>>> PERFORMANCE BATTLE: {name}", flush=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
+    
+    # NEW: Automatic Production Weight Loading
+    weight_file = f"cast_g_{lang_code}_production.pt"
+    if "CAST-G" in name and CONFIG['load_weights'] and os.path.exists(weight_file):
+        print(f">>> [DETECTED] Loading Production Weights: {weight_file}")
+        model.load_state_dict(torch.load(weight_file, map_location=device))
+        print(">>> [SUCCESS] Continuing from production training.")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
     model.train()
     
@@ -129,7 +140,7 @@ if __name__ == "__main__":
     cast_g = CASTGModel(d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'])
     token = TokenModel(vocab_size=256, d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'])
     
-    c_res = run_benchmark("CAST-G (Modular Hardware-Aware)", cast_g, data)
+    c_res = run_benchmark("CAST-G (Modular Hardware-Aware)", cast_g, data, lang_code=args.lang)
     b_res = run_benchmark("Baseline (Discrete)", token, data)
     
     print_matrix({'castg': c_res, 'baseline': b_res})
