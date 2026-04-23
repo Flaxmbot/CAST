@@ -59,11 +59,14 @@ def pool_jagged(h_bytes: torch.Tensor, boundaries: torch.Tensor):
     segment_ids = torch.cumsum(boundaries, dim=1).long()
     max_segments = segment_ids.max().item() + 1
     
-    # Parallel Aggregation (Strict DType alignment for AMP)
+    # Absolute DType Unification for GPU stability
     pooled = torch.zeros(B, max_segments, D, device=device, dtype=h_bytes.dtype)
     counts = torch.zeros(B, max_segments, 1, device=device, dtype=h_bytes.dtype)
     
     idx_expanded = segment_ids.unsqueeze(-1).expand(-1, -1, D)
+    
+    # Force alignment right before the operation
+    h_bytes = h_bytes.to(pooled.dtype)
     pooled.scatter_add_(1, idx_expanded, h_bytes)
     
     # Ensure 'ones' matches the dtype of h_bytes exactly
