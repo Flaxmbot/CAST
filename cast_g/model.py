@@ -40,24 +40,23 @@ class CASTGModel(nn.Module):
         # 4. Byte Decoding (Direct from Transformer output)
         logits = self.decoder(h_global)
         
+        # [FIX]: Upsample logits back to original byte resolution (T)
+        # This ensures generate() can take logits[:, -1, :] as the next byte prediction
+        B, S, V = logits.shape
+        T_original = idx.size(1)
+        
+        logits = F.interpolate(
+            logits.transpose(1, 2), 
+            size=T_original, 
+            mode='nearest'
+        ).transpose(1, 2)
+        
         loss = None
         metrics = {}
         if targets is not None:
             # A. Reconstruction Loss (Fidelity)
-            # [FIX]: Upsample logits back to original byte resolution (4x)
-            # This is stable for Multi-GPU because S is now fixed by pool_jagged.
-            B, S, V = logits.shape
-            T_original = targets.size(1)
-            
-            logits_upsampled = F.interpolate(
-                logits.transpose(1, 2), 
-                size=T_original, 
-                mode='nearest'
-            ).transpose(1, 2)
-            
-            # Now shapes match: [B, T, 256] and [B, T]
             loss_recon = F.cross_entropy(
-                logits_upsampled.reshape(-1, 256), 
+                logits.reshape(-1, 256), 
                 targets.reshape(-1)
             )
             
@@ -105,7 +104,5 @@ class CASTGModel(nn.Module):
             probs = torch.softmax(last_logits, dim=-1)
             next_byte = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_byte], dim=1)
-            # Stop if we get a null or repeated sequence (for short benchmark)
-            if idx.size(1) > 200: break 
         self.train()
         return idx
