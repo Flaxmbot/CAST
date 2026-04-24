@@ -1,20 +1,24 @@
 """
-CAST-G Decoder — Autoregressive Local Byte Decoder.
+CAST-G Decoder — Segment Unpool + Upsample Byte Decoder.
 
-CRITICAL FIX: Replaces the single Linear(d_model, 8*256) with a small
-causal Transformer that autoregressively models inter-byte dependencies
-within each expansion block.
+CRITICAL FIX (v3.1): Replaces the fixed-expansion AR decoder that caused
+catastrophic position misalignment (BPB > 8.0, worse than random).
 
-Why this matters: A single linear projection cannot model P(byte_5 | byte_1..4).
-Each of the 8 predicted bytes is independent of the others — causing incoherent
-generation. MegaByte (Meta, 2023) solves this with a small autoregressive local
-decoder, and we do the same here with a more efficient cross-attention design.
-
-Architecture:
-    segment_latent → cross-attention → causal self-attention → byte logits
+The Problem (v3):
+    Segments have VARIABLE sizes (e.g. 3, 8, 12 encoded positions each).
+    The old decoder expanded every segment by a FIXED 'expansion' factor,
+    then blindly padded/trimmed to match T. This meant:
+    - Segment covering bytes 0-11 produced 8 predictions (missed 4 bytes)
+    - Segment covering bytes 12-15 produced 8 predictions (4 predictions had no target)
+    - Zero-padding for remaining positions predicted byte 0 everywhere
     
-    The segment latent provides the "what to say" (content),
-    and the autoregressive self-attention provides the "how to spell it" (byte order).
+The Fix:
+    1. Unpool: map each segment representation BACK to its constituent positions
+       using the segment IDs from the hierarchy (lossless, no misalignment)
+    2. Upsample: transpose-convolve from T//4 back to T (reverses encoder stride)
+    3. Project: Linear(D, 256) at each position → byte logits
+    
+    This guarantees every byte position gets a prediction from its correct segment.
 """
 import torch
 import torch.nn as nn
@@ -22,187 +26,86 @@ import torch.nn.functional as F
 from typing import Optional
 
 
-class LocalDecoderBlock(nn.Module):
+class UpsampleDecoder(nn.Module):
     """
-    Single block of the local autoregressive decoder.
-    
-    1. Cross-attention from byte positions to the parent segment latent
-    2. Causal self-attention between byte positions within the block
-    3. Feed-forward network
-    
-    All using scaled_dot_product_attention for T4-compatible efficiency.
-    """
-    def __init__(self, d_model: int, n_head: int, dropout: float = 0.1):
-        super().__init__()
-        self.d_model = d_model
-        self.n_head = n_head
-        self.head_dim = d_model // n_head
-        
-        # Cross-attention: bytes attend to segment latent
-        self.cross_q = nn.Linear(d_model, d_model)
-        self.cross_k = nn.Linear(d_model, d_model)
-        self.cross_v = nn.Linear(d_model, d_model)
-        self.cross_out = nn.Linear(d_model, d_model)
-        self.cross_norm = nn.LayerNorm(d_model)
-        
-        # Causal self-attention: bytes attend to previous bytes in block
-        self.self_q = nn.Linear(d_model, d_model)
-        self.self_k = nn.Linear(d_model, d_model)
-        self.self_v = nn.Linear(d_model, d_model)
-        self.self_out = nn.Linear(d_model, d_model)
-        self.self_norm = nn.LayerNorm(d_model)
-        
-        # FFN
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(4 * d_model, d_model),
-            nn.Dropout(dropout),
-        )
-        self.ffn_norm = nn.LayerNorm(d_model)
-        
-        self.dropout = nn.Dropout(dropout)
-        
-    def _reshape_for_attention(self, x: torch.Tensor) -> torch.Tensor:
-        """Reshape [B*S, L, D] → [B*S, n_head, L, head_dim]"""
-        BS, L, D = x.shape
-        return x.view(BS, L, self.n_head, self.head_dim).transpose(1, 2)
-    
-    def forward(self, byte_embeds: torch.Tensor, segment_latent: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            byte_embeds: [B*S, expansion, D] — byte position embeddings
-            segment_latent: [B*S, 1, D] — parent segment representation
-            
-        Returns:
-            [B*S, expansion, D] — updated byte representations
-        """
-        # 1. Cross-attention to segment latent (pre-norm)
-        normed = self.cross_norm(byte_embeds)
-        q = self._reshape_for_attention(self.cross_q(normed))        # [B*S, H, E, hd]
-        k = self._reshape_for_attention(self.cross_k(segment_latent)) # [B*S, H, 1, hd]
-        v = self._reshape_for_attention(self.cross_v(segment_latent)) # [B*S, H, 1, hd]
-        
-        cross_out = F.scaled_dot_product_attention(q, k, v)  # [B*S, H, E, hd]
-        cross_out = cross_out.transpose(1, 2).contiguous().view(byte_embeds.shape)
-        byte_embeds = byte_embeds + self.dropout(self.cross_out(cross_out))
-        
-        # 2. Causal self-attention (pre-norm)
-        normed = self.self_norm(byte_embeds)
-        q = self._reshape_for_attention(self.self_q(normed))
-        k = self._reshape_for_attention(self.self_k(normed))
-        v = self._reshape_for_attention(self.self_v(normed))
-        
-        # Causal mask: each byte only attends to previous bytes in the block
-        self_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        self_out = self_out.transpose(1, 2).contiguous().view(byte_embeds.shape)
-        byte_embeds = byte_embeds + self.dropout(self.self_out(self_out))
-        
-        # 3. FFN (pre-norm)
-        byte_embeds = byte_embeds + self.ffn(self.ffn_norm(byte_embeds))
-        
-        return byte_embeds
-
-
-class AutoregressiveLocalDecoder(nn.Module):
-    """
-    Small causal Transformer that generates 'expansion' bytes per segment.
-    
-    Unlike the v2 single Linear(d_model, expansion*256), this models
-    inter-byte dependencies: P(byte_k | byte_1..k-1, segment_latent).
+    Decoder that reverses the encoder's stride-4 compression.
     
     Architecture:
-        1. Each segment latent is "unrolled" into `expansion` byte positions
-        2. Byte positions get learned positional embeddings (0..expansion-1)
-        3. Cross-attention injects the segment's semantic content
-        4. Causal self-attention models byte-to-byte dependencies
-        5. Final linear head produces byte logits (256-way)
+        segment_reps [B, S, D]
+            → unpool to [B, T//4, D] (using segment_ids)
+            → refine with local causal convolutions
+            → upsample to [B, T, D] (transposed conv, stride 4)
+            → byte logits [B, T, 256]
     """
-    def __init__(self, d_model: int, expansion: int = 8, n_layer: int = 2, n_head: int = 4, dropout: float = 0.1):
+    def __init__(self, d_model: int, dropout: float = 0.1):
         super().__init__()
         self.d_model = d_model
-        self.expansion = expansion
         
-        # Positional embeddings for byte positions within a block
-        self.pos_embed = nn.Embedding(expansion, d_model)
+        # Refine unpooled representations with local context
+        self.refine = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 2 * d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(2 * d_model, d_model),
+            nn.Dropout(dropout),
+        )
         
-        # Decoder blocks
-        self.blocks = nn.ModuleList([
-            LocalDecoderBlock(d_model, n_head, dropout=dropout)
-            for _ in range(n_layer)
-        ])
+        # Upsample from T//4 back to T (reverses encoder's stride-4 conv)
+        self.upsample = nn.ConvTranspose1d(
+            d_model, d_model, kernel_size=4, stride=4
+        )
+        self.up_norm = nn.LayerNorm(d_model)
         
-        # Output head: d_model → 256 byte logits
-        self.head_norm = nn.LayerNorm(d_model)
+        # Byte prediction head
         self.head = nn.Linear(d_model, 256)
-        
-    def forward(self, segment_latents: torch.Tensor) -> torch.Tensor:
+    
+    def forward(
+        self,
+        segment_reps: torch.Tensor,
+        segment_ids: torch.Tensor,
+        T_encoded: int,
+        T_original: int,
+    ) -> torch.Tensor:
         """
-        Expand segment-level latents into byte-level predictions.
+        Decode segment representations back to byte-level logits.
         
         Args:
-            segment_latents: [B, S, D] — one latent per segment
+            segment_reps: [B, S, D] — global stack output (one per segment)
+            segment_ids: [B, T_encoded] — which segment each encoded position belongs to
+            T_encoded: number of encoded positions (T//4)
+            T_original: original byte sequence length (T)
             
         Returns:
-            logits: [B, S * expansion, 256] — byte logits
+            logits: [B, T_original, 256] — byte prediction logits
         """
-        B, S, D = segment_latents.shape
-        E = self.expansion
+        B, S, D = segment_reps.shape
         
-        # Create byte position embeddings: [E, D]
-        positions = torch.arange(E, device=segment_latents.device)
-        pos_embeds = self.pos_embed(positions)  # [E, D]
+        # 1. Unpool: scatter segment reps back to their encoded positions
+        # segment_ids[b, t] tells us which segment position t belongs to
+        # We use this to gather the correct segment rep for each position
+        ids_clamped = segment_ids.clamp(0, S - 1)  # [B, T_encoded]
+        ids_expanded = ids_clamped.unsqueeze(-1).expand(-1, -1, D)  # [B, T_encoded, D]
+        h_unpooled = torch.gather(segment_reps, 1, ids_expanded)  # [B, T_encoded, D]
         
-        # Broadcast to all segments: [B*S, E, D]
-        byte_embeds = pos_embeds.unsqueeze(0).expand(B * S, -1, -1)
+        # 2. Refine with local context (residual)
+        h_unpooled = h_unpooled + self.refine(h_unpooled)
         
-        # Reshape segment latents for cross-attention: [B*S, 1, D]
-        seg_flat = segment_latents.reshape(B * S, 1, D)
+        # 3. Upsample: T//4 → T (reverses encoder stride-4)
+        # [B, T_encoded, D] → [B, D, T_encoded] → ConvTranspose → [B, D, T'] → [B, T', D]
+        h_up = self.upsample(h_unpooled.transpose(1, 2))  # [B, D, T']
+        h_up = h_up.transpose(1, 2)  # [B, T', D]
         
-        # Run through decoder blocks
-        for block in self.blocks:
-            byte_embeds = block(byte_embeds, seg_flat)
+        # Trim or pad to exact T_original
+        if h_up.size(1) > T_original:
+            h_up = h_up[:, :T_original, :]
+        elif h_up.size(1) < T_original:
+            pad = torch.zeros(B, T_original - h_up.size(1), D, device=h_up.device, dtype=h_up.dtype)
+            h_up = torch.cat([h_up, pad], dim=1)
         
-        # Project to byte logits
-        logits = self.head(self.head_norm(byte_embeds))  # [B*S, E, 256]
+        h_up = self.up_norm(h_up)
         
-        # Reshape to [B, S*E, 256]
-        logits = logits.view(B, S * E, 256)
+        # 4. Predict bytes
+        logits = self.head(h_up)  # [B, T_original, 256]
         
         return logits
-    
-    def generate_block(self, segment_latent: torch.Tensor, temp: float = 0.7) -> torch.Tensor:
-        """
-        Autoregressively generate one block of bytes from a segment latent.
-        Used during inference for higher quality generation.
-        
-        Args:
-            segment_latent: [B, 1, D] — single segment latent
-            temp: sampling temperature
-            
-        Returns:
-            bytes: [B, expansion] — generated byte indices
-        """
-        B = segment_latent.size(0)
-        D = segment_latent.size(2)
-        E = self.expansion
-        device = segment_latent.device
-        
-        # Start with just positional embeddings
-        positions = torch.arange(E, device=device)
-        byte_embeds = self.pos_embed(positions).unsqueeze(0).expand(B, -1, -1)  # [B, E, D]
-        seg_flat = segment_latent  # [B, 1, D]
-        
-        # Forward through all blocks (causal mask ensures autoregressive)
-        for block in self.blocks:
-            byte_embeds = block(byte_embeds, seg_flat)
-        
-        # Get logits and sample
-        logits = self.head(self.head_norm(byte_embeds))  # [B, E, 256]
-        logits = logits / temp
-        probs = torch.softmax(logits, dim=-1)
-        
-        # Sample each position
-        sampled = torch.multinomial(probs.view(B * E, 256), num_samples=1)
-        return sampled.view(B, E)

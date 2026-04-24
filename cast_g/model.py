@@ -32,7 +32,7 @@ from .encoder import ByteEncoder
 from .boundary import MIBoundaryDetector, MISegmentationLoss
 from .hierarchy import HierarchicalSegmenter
 from .global_stack import MoDTransformerStack, pool_segments
-from .decoder import AutoregressiveLocalDecoder
+from .decoder import UpsampleDecoder
 from .config import get_config
 
 
@@ -85,12 +85,10 @@ class CASTGModel(nn.Module):
             dropout=dropout,
         )
         
-        # 4. Autoregressive Local Decoder: segment → expansion bytes
-        self.decoder = AutoregressiveLocalDecoder(
+        # 4. Decoder: unpool segments → upsample → byte logits
+        # Uses segment_ids for EXACT position alignment (no fixed expansion)
+        self.decoder = UpsampleDecoder(
             d_model=d_model,
-            expansion=config.get('decoder_expansion', 8),
-            n_layer=config.get('decoder_n_layer', 2),
-            n_head=config.get('decoder_n_head', 4),
             dropout=dropout,
         )
         
@@ -142,17 +140,12 @@ class CASTGModel(nn.Module):
         # 3. Global reasoning on Level 0 (finest) segments
         # Level 0 has the most segments and finest granularity
         fine_segments = level_segments[0]
+        fine_segment_ids = level_segment_ids[0]  # [B, T_encoded]
         h_global, mod_metrics = self.global_stack(fine_segments)
         
-        # 4. Decode: expand each segment into 'expansion' byte predictions
-        logits = self.decoder(h_global)  # [B, S0 * expansion, 256]
-        
-        # 5. Alignment: match logits to original sequence length T
-        if logits.size(1) > T:
-            logits = logits[:, :T, :]
-        elif logits.size(1) < T:
-            padding = torch.zeros(B, T - logits.size(1), 256, device=logits.device, dtype=logits.dtype)
-            logits = torch.cat([logits, padding], dim=1)
+        # 4. Decode: unpool segments → upsample → byte logits
+        # Uses segment_ids for EXACT position alignment (no blind padding)
+        logits = self.decoder(h_global, fine_segment_ids, T_encoded, T)
         
         # 6. Loss computation
         loss = None
@@ -197,9 +190,7 @@ class CASTGModel(nn.Module):
         """
         Generate bytes autoregressively.
         
-        Uses block-autoregressive generation: each forward pass produces
-        'expansion' new bytes via the local AR decoder, then those bytes
-        are fed back as input for the next block.
+        Each step does a full forward pass and samples from the last position.
         
         Args:
             idx: [B, T] — prompt byte indices
@@ -213,33 +204,20 @@ class CASTGModel(nn.Module):
         idx = idx.to(device)
         self.eval()
         
-        expansion = self.config.get('decoder_expansion', 8)
-        steps = (max_new_tokens + expansion - 1) // expansion
-        
-        for _ in range(steps):
-            # Encode current context
-            h_bytes = self.encoder(idx)
+        for _ in range(max_new_tokens):
+            # Use last block_size bytes as context
+            block_size = self.config.get('block_size', 1024)
+            context = idx[:, -block_size:] if idx.size(1) > block_size else idx
             
-            # Segment (use low temperature for sharp boundaries during generation)
-            level_segments, _, _, _ = self.hierarchy(h_bytes, temp=0.1, hard=True)
+            # Full forward pass (no targets → no loss)
+            logits, _ = self.forward(context, targets=None)
             
-            # Global reasoning on fine segments
-            fine_segments = level_segments[0]
-            h_global, _ = self.global_stack(fine_segments)
+            # Sample from last position
+            last_logits = logits[:, -1, :] / temp  # [B, 256]
+            probs = torch.softmax(last_logits, dim=-1)
+            next_byte = torch.multinomial(probs, num_samples=1)  # [B, 1]
             
-            # Generate next block from the LAST segment
-            if h_global.size(1) == 0:
-                break
-                
-            last_segment = h_global[:, -1:, :]  # [B, 1, D]
-            next_bytes = self.decoder.generate_block(last_segment, temp=temp)  # [B, expansion]
-            
-            idx = torch.cat([idx, next_bytes], dim=1)
-            
-            # Safety: limit total sequence length
-            max_len = self.config.get('block_size', 1024) * 2
-            if idx.size(1) > max_len:
-                break
+            idx = torch.cat([idx, next_byte], dim=1)
         
         self.train()
         return idx

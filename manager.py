@@ -105,10 +105,20 @@ def train(dataset_name, config_name, steps, batch_size=None):
     
     # Initialize models
     cast_model = CASTGModel(config=config_name).to(device)
+    
+    # Scale baseline to match CAST-G parameter count (FAIR comparison)
+    cast_params = sum(p.numel() for p in cast_model.parameters())
+    best_nl, best_diff = 4, float('inf')
+    for nl in range(4, 17):
+        bp = sum(p.numel() for p in TokenModel(256, config['d_model'], nl, config['n_head'], config['block_size']).parameters())
+        if abs(bp - cast_params) < best_diff:
+            best_nl, best_diff = nl, abs(bp - cast_params)
+    fair_n_layers = best_nl
+    
     base_model = TokenModel(
         vocab_size=256,
         d_model=config['d_model'],
-        n_layer=config.get('global_n_layer', 4),
+        n_layer=fair_n_layers,
         n_head=config['n_head'],
         block_size=config['block_size'],
     ).to(device)

@@ -7,7 +7,7 @@ from .encoder import ByteEncoder
 from .boundary import MIBoundaryDetector, MISegmentationLoss, AdaptiveLagrangian
 from .hierarchy import HierarchicalSegmenter
 from .global_stack import MoDTransformerStack, MoDSegmentRouter, CausalTransformerBlock
-from .decoder import AutoregressiveLocalDecoder
+from .decoder import UpsampleDecoder
 
 __all__ = [
     'CASTGModel',
