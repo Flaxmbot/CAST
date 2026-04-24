@@ -18,6 +18,7 @@ def setup():
         print("❌ ERROR: No GPU detected. Please go to Runtime -> Change Runtime Type -> T4 GPU.")
         return False
     
+    print(f"✅ {torch.cuda.device_count()} GPU(s) detected.")
     # GPU Optimizations
     torch.backends.cudnn.benchmark = True
         
@@ -72,6 +73,15 @@ def train(lang_code, data_path, steps, batch_size=64):
     cast_model = CASTGModel(d_model=256, n_layer=4, n_head=8).to(device)
     base_model = TokenModel(vocab_size=256, d_model=256, n_layer=4, n_head=8, block_size=1024).to(device)
     
+    # Multi-GPU support
+    if torch.cuda.device_count() > 1:
+        print(f"⚡ Multi-GPU detected! Wrapping models in DataParallel.")
+        cast_model = torch.nn.DataParallel(cast_model)
+        base_model = torch.nn.DataParallel(base_model)
+        # Scale batch size for multiple GPUs
+        batch_size = batch_size * torch.cuda.device_count()
+        print(f"📈 Scaled effective batch size to {batch_size}")
+    
     with open(data_path, "r", encoding="utf-8") as f:
         text = f.read()
     data = torch.tensor([b for b in text.encode('utf-8')], dtype=torch.long)
@@ -114,8 +124,9 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
             seg_info = f" | Seg: {avg_seg:.2f} bytes" if show_seg else ""
             print(f"  Step {step:5d} | Loss: {loss.item():.4f}{seg_info}")
 
-    # Weights saved as standard state_dict
-    torch.save(model.state_dict(), save_path)
+    # Weights saved as standard state_dict (stripping DataParallel wrapper if present)
+    save_obj = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+    torch.save(save_obj, save_path)
     print(f"✅ Weights saved as {save_path}")
 
 def main():
