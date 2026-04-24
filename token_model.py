@@ -1,26 +1,99 @@
+"""
+Token-Based Baseline Model — Fair Comparison Target.
+
+Standard Transformer with discrete byte vocabulary (256).
+Uses the same F.scaled_dot_product_attention as CAST-G for fair
+benchmarking (both use Flash/Memory-Efficient Attention when available).
+
+FIX from v2: Proper causal masking via is_causal=True instead of
+manual mask construction.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
-# --- Standard Tokenizer-Based Architecture (The Baseline) ---
+
+class BaselineBlock(nn.Module):
+    """Pre-norm Transformer block with SDPA causal attention."""
+    def __init__(self, d_model: int, n_head: int, dropout: float = 0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.n_head = n_head
+        self.head_dim = d_model // n_head
+        
+        # Pre-norm attention
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        
+        # Pre-norm FFN
+        self.ffn_norm = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model),
+            nn.Dropout(dropout),
+        )
+        
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        
+        # Pre-norm causal self-attention
+        normed = self.attn_norm(x)
+        q = self.q_proj(normed).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(normed).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        v = self.v_proj(normed).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        
+        # SDPA with causal masking (same as CAST-G for fair comparison)
+        attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D)
+        x = x + self.dropout(self.out_proj(attn_out))
+        
+        # Pre-norm FFN
+        x = x + self.ffn(self.ffn_norm(x))
+        
+        return x
+
+
 class TokenModel(nn.Module):
     """
-    Standard Transformer with a Discrete Vocabulary (Character-level).
-    This serves as the benchmark baseline.
+    Standard byte-level Transformer baseline.
+    
+    Uses the same attention backend as CAST-G (SDPA with is_causal=True)
+    for a fair throughput comparison. The only architectural difference
+    is that this model processes the FULL byte sequence through every
+    attention layer, while CAST-G compresses first.
     """
-    def __init__(self, vocab_size: int = 256, d_model: int = 384, n_layer: int = 6, n_head: int = 6, block_size: int = 256):
+    def __init__(
+        self,
+        vocab_size: int = 256,
+        d_model: int = 256,
+        n_layer: int = 4,
+        n_head: int = 8,
+        block_size: int = 1024,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         self.d_model = d_model
         self.block_size = block_size
-        self.head_dim = d_model // n_head
         
-        # Traditional Embedding Table
+        # Embeddings
         self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.pos_emb = nn.Parameter(torch.zeros(1, block_size, d_model)) # Standard learned pos emb
+        self.pos_emb = nn.Parameter(torch.zeros(1, block_size, d_model))
         
-        self.blocks = nn.ModuleList([BaselineBlock(d_model, n_head, self.head_dim) for _ in range(n_layer)])
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            BaselineBlock(d_model, n_head, dropout=dropout)
+            for _ in range(n_layer)
+        ])
+        
         self.ln_f = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
         
@@ -36,14 +109,12 @@ class TokenModel(nn.Module):
 
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None, **kwargs):
         B, T = idx.shape
-        # Standard Lookup
-        x = self.token_embedding(idx) 
+        
+        x = self.token_embedding(idx)
         x = x + self.pos_emb[:, :T, :]
         
-        mask = torch.tril(torch.ones(T, T, device=idx.device)).view(1, 1, T, T)
-        
         for block in self.blocks:
-            x = block(x, mask=mask)
+            x = block(x)
             
         x = self.ln_f(x)
         logits = self.head(x)
@@ -56,42 +127,14 @@ class TokenModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int = 50, temp: float = 0.7):
-        # FIX: Ensure prompt is on the correct device
         idx = idx.to(next(self.parameters()).device)
         self.eval()
         for _ in range(max_new_tokens):
-            # Crop to block size
             idx_cond = idx[:, -self.block_size:]
             logits, _ = self.forward(idx_cond)
-            # Focus on last step and apply temperature
             logits = logits[:, -1, :] / temp
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_token], dim=1)
         self.train()
         return idx
-
-class BaselineBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, head_dim: int):
-        super().__init__()
-        self.ln1 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(d_model, n_head, batch_first=True)
-        self.ln2 = nn.LayerNorm(d_model)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
-            nn.GELU(),
-            nn.Linear(4 * d_model, d_model)
-        )
-
-    def forward(self, x, mask=None):
-        # Use standard mask for consistency
-        # MultiheadAttention expects (L, L) mask of boolean or float
-        m = None
-        if mask is not None:
-            m = (mask[0, 0] == 0) # Convert to boolean attention mask
-            
-        x_norm = self.ln1(x)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm, attn_mask=m, need_weights=False)
-        x = x + attn_out
-        x = x + self.mlp(self.ln2(x))
-        return x

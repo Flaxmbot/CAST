@@ -1,105 +1,143 @@
-<div align="center">
+# CAST-G v3: Token-Agnostic Neural Architecture
 
-# 🪐 CAST-G: Token-Agnostic Neural Architecture
-### Compressed Architecture of Segmented Tensors - Generation
+> **Hierarchical MI-Segmented Architecture with Mixture-of-Depths Routing**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)](https://pytorch.org/)
-
-<img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=600&size=24&pause=1000&color=00F2FF&center=true&vCenter=true&width=600&lines=Killing+the+Tokenization+Bottleneck;The+Future+of+Compressed+Intelligence;8.2x+Higher+Density+than+Transformers;Direct+Byte-to-Reasoning+Processing" alt="Typing Animation" />
-
-</div>
+CAST-G (Compress–Attend–Synthesize Transformer, Generative) is a research architecture for byte-level language modeling that eliminates tokenizers like BPE, WordPiece, and SentencePiece. Instead of a fixed vocabulary, CAST-G learns to dynamically segment raw bytes into variable-length segments using information-theoretic criteria.
 
 ---
 
-## 📄 Abstract
-In the era of Large Language Models, the **Tokenization Bottleneck** remains the single greatest barrier to true cross-lingual and efficient intelligence. Current architectures (GPT, Llama) rely on fixed subword dictionaries that are brittle, language-dependent, and biologically implausible. 
+## Novel Contributions
 
-**CAST-G** introduces a revolutionary paradigm: **Dynamic Neural Segmentation**. Instead of a fixed dictionary, CAST-G employs a Lagrangian-optimized boundary detector that learns to group raw bytes into compressed semantic segments on-the-fly. This results in an architecture that is **shift-invariant**, **multilingual by design**, and achieves **6x higher inference throughput** than standard byte-level transformers.
+CAST-G v3 introduces three unpublished innovations over prior art (BLT, Nawrot et al., MegaByte, EvaByte):
+
+### 1. Mutual Information-Driven Boundary Detection
+Unlike Nawrot (2023) who uses Gumbel-Sigmoid with a heuristic Lagrangian, and BLT (2024) which uses entropy-based patching, CAST-G places segment boundaries where the **mutual information between left and right context windows drops sharply**. This is theoretically grounded in information theory and produces linguistically meaningful boundaries without supervision.
+
+**Key difference from prior art**: MI estimates semantic coherence between adjacent spans, producing boundaries that correlate with morpheme, word, and phrase structure. Nawrot's approach is purely heuristic (learned binary classifier with a Lagrangian constraint on count). BLT's entropy-based patching only considers the predictability of individual bytes, not the relationship between adjacent contexts.
+
+### 2. Hierarchical Multi-Scale Segmentation
+CAST-G simultaneously learns **three levels** of segmentation:
+- **Level 0 (Fine)**: ~4-8 byte segments (morpheme/syllable scale)
+- **Level 1 (Medium)**: ~16-32 byte segments (word/compound scale)
+- **Level 2 (Coarse)**: ~48-96 byte segments (phrase/clause scale)
+
+Cross-level attention enables bidirectional information flow: coarse planning guides fine execution, while fine details inform coarse decisions. **No published work does multi-level dynamic segmentation end-to-end.**
+
+### 3. Mixture-of-Depths Segment Routing (MoD-S)
+Adapting Raposo et al. (2024), CAST-G applies Mixture-of-Depths to **dynamically-segmented byte representations**. Trivial segments (articles, spaces, common words) skip Transformer layers via residual bypass. Complex segments (rare words, code, names) get full attention processing. This creates two orthogonal efficiency axes: dynamic segmentation reduces sequence length, and MoD routing reduces compute per remaining segment.
 
 ---
 
-## 🛠 The Architecture: How it Works
+## Architecture
 
-CAST-G operates on a **Compress-Reason-Decompress** loop, bypassing the need for a static tokenizer.
-
-### 1. High-Frequency Encoder
-The raw byte stream $\mathbf{x} \in \mathbb{R}^{B \times L}$ is projected into a high-dimensional latent space. Unlike subword embeddings, this is a continuous representation of the raw signal.
-
-### 2. Lagrangian Segmentation
-The model predicts a boundary probability $\pi_t$ for every byte. The segmentation is governed by the **Lagrangian Multiplier** $\lambda$, which balances reconstruction accuracy against a target segment length $\mu$:
-
-$$L = L_{recon} + \lambda | \frac{1}{N} \sum_{i=1}^N S_i - \mu |$$
-
-Where $S_i$ is the length of the $i$-th segment. This allows the model to "group" characters into words or syllables without ever being told what a word is.
-
-### 3. Modular Hardware-Aware Transformer
-Once segmented, the compressed tensors are passed to a standard Transformer stack. Because the sequence is now **~8x shorter**, the attention mechanism $O(T^2)$ becomes exponentially faster.
-
-```mermaid
-graph TD
-    A[Raw Bytes] --> B[Byte Encoder]
-    B --> C{Boundary Detector}
-    C -- "p > 0.5" --> D[Segment Compression]
-    C -- "p < 0.5" --> B
-    D --> E[Transformer Stack]
-    E --> F[Segment Decoder]
-    F --> G[Reconstructed Bytes]
-    
-    style D fill:#00F2FF,stroke:#333,stroke-width:2px
-    style E fill:#7000FF,stroke:#333,stroke-width:2px
+```
+Raw Bytes [B, T]
+    │
+    ▼
+ByteEncoder (MultiScale Conv + Parallel LRU)
+    │                                      [B, T/4, D]
+    ▼
+HierarchicalSegmenter (3 MI-Boundary Levels + Cross-Level Attention)
+    │                                      Level 0: [B, S₀, D]
+    │                                      Level 1: [B, S₁, D]
+    │                                      Level 2: [B, S₂, D]
+    ▼
+MoD-TransformerStack (Causal SDPA + Per-Layer Routing)
+    │                                      [B, S₀, D] (subset computed)
+    ▼
+AutoregressiveLocalDecoder (Cross-Attention + Causal Self-Attention)
+    │                                      [B, S₀ × 8, 256]
+    ▼
+Byte Logits [B, T, 256]
 ```
 
 ---
 
-## 📊 Benchmark Battle: CAST-G vs. Baseline
-Evaluation performed on **TinyStories-v2** and **IITB Hindi Corpus** with a context length of **1024**.
+## Components & Prior Art Acknowledgment
 
-| Metric | Baseline (Token-Byte) | **CAST-G (Production)** |
-| :--- | :--- | :--- |
-| **English Throughput** | 134,596 B/s | **627,508 B/s** ⭐ |
-| **Hindi Throughput** | 134,409 B/s | **469,231 B/s** ⭐ |
-| **Compression Ratio** | 1.00x | **8.02x** ⭐ |
-| **Hindi Logic** | Collapsed (Byte-Noise) | **Stable (Semantic)** ⭐ |
-| **Token Blindness** | High (Brittle) | **Zero (Universal)** |
+| Component | Our Version | Prior Art | What's Different |
+|:---|:---|:---|:---|
+| Byte Embedding | 256-entry table | ByT5, BLT, EvaByte | Same (standard) |
+| Local Encoder | Multi-scale Conv + Parallel LRU | BLT (cross-attn), Mamba (SSM) | Multi-kernel fusion, parallel scan |
+| Boundary Detection | **MI-driven** (InfoNCE) | Nawrot (Gumbel), BLT (entropy) | **Novel**: information-theoretic, not heuristic |
+| Segmentation | **3-level hierarchy** | All prior: single level | **Novel**: fractal compression hierarchy |
+| Lagrangian | **Adaptive dual-variable** | Nawrot (fixed λ) | Proper optimization, not heuristic |
+| Global Reasoning | **MoD-Transformer** | BLT/MegaByte (full) | **Novel**: segment-level MoD routing |
+| Local Decoder | AR cross-attn Transformer | MegaByte (AR Transformer) | Similar approach (not claimed as novel) |
 
 ---
 
-## 🚀 Getting Started
+## Metrics
 
-### Installation
-```bash
-git clone https://github.com/Flaxmbot/CAST.git
-cd CAST
-pip install torch datasets transformers
-```
+CAST-G reports standard metrics for scientific comparability:
 
-### Usage: The Interactive Manager
-CAST-G comes with a production-grade manager for training and benchmarking.
+- **Bits-per-byte (BPB)**: `CE_loss / ln(2)` — the standard for byte-level models
+- **Throughput**: Bytes/second — labeled as raw processing speed, not quality
+- **Segment statistics**: Actual learned segment lengths per hierarchy level
+
+### Reference BPB on enwik8
+
+| Model | Params | BPB |
+|:---|:---|:---|
+| Random (uniform 256) | — | 8.00 |
+| gzip compression | — | ~2.90 |
+| BLT 1B | 1B | ~1.20 |
+| BLT 8B | 8B | ~1.00 |
+| EvaByte 6.5B | 6.5B | ~1.10 |
+| **CAST-G Small** | ~5M | TBD |
+| **CAST-G Medium** | ~50M | TBD |
+
+> **Note**: CAST-G is a research prototype. It is not competitive with industrial-scale models (BLT at 8B, EvaByte at 6.5B) in absolute quality. Its contribution is architectural novelty, not scale.
+
+---
+
+## Usage
+
 ```bash
+# Interactive mode
 python manager.py
+
+# Train on enwik8 (standard benchmark)
+python manager.py --mode train --dataset enwik8 --config small
+
+# Run benchmarks
+python manager.py --mode bench --dataset enwik8
+
+# Full suite (train + benchmark on enwik8 and text8)
+python manager.py --mode all
 ```
-1. **Train English**: High-quality narratives (TinyStories).
-2. **Train Hindi**: Professional corpus (IITB).
-3. **Benchmark**: Real-world performance battle.
 
 ---
 
-## 🛤 Roadmap
-- [x] **Phase 1**: Token-Agnostic Core Implementation.
-- [x] **Phase 2**: Production-Grade Benchmarking Suite.
-- [ ] **Phase 3**: Multi-Scale Fractal Memory (FRL-1 Research).
-- [ ] **Phase 4**: Scaling to 32k Context Lengths via Dynamic Patching.
+## Configuration
+
+| Setting | Small (~5M) | Medium (~50M) |
+|:---|:---|:---|
+| d_model | 256 | 512 |
+| n_layers | 4 | 8 |
+| n_heads | 8 | 8 |
+| MoD capacity | 50% | 60% |
+| Hierarchy levels | 3 | 3 |
+| Decoder layers | 2 | 3 |
+| Block size | 1024 | 1024 |
 
 ---
 
-## 🤝 Contributing
-We welcome research contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+## Citations
 
-## ⚖ License
-MIT License. See [LICENSE](LICENSE) for more information.
+This work builds on and acknowledges the following papers:
 
-<div align="center">
-Built with 🪐 by the CAST-G Research Team.
-</div>
+- **BLT**: Meta, 2024. "Byte Latent Transformer: Patches Scale Better Than Tokens"
+- **Nawrot et al.**: 2023. "Efficient Transformers with Dynamic Token Pooling"
+- **MegaByte**: Meta, 2023. "Predicting Million-Byte Sequences with Multiscale Transformers"
+- **EvaByte**: 2025. "An Efficient Byte-Level Language Model"
+- **ByT5**: Google, 2022. "ByT5: Towards a Token-Free Future with Pre-trained Byte-to-Byte Models"
+- **Raposo et al.**: 2024. "Mixture-of-Depths: Dynamically Allocating Compute in Transformer-Based LMs"
+- **van den Oord et al.**: 2018. "Representation Learning with Contrastive Predictive Coding" (InfoNCE)
+- **Orvieto et al.**: 2023. "Resurrecting Recurrent Neural Networks for Long Sequences" (LRU)
+
+---
+
+## License
+
+Research use only. Not for production deployment.

@@ -1,166 +1,271 @@
+"""
+CAST-G Benchmarker — Honest, Standard Metrics.
+
+Reports:
+1. Bits-per-byte (BPB) — THE standard metric for byte-level models
+2. Raw throughput (bytes/second) — labeled honestly
+3. Segment analysis — what the hierarchy actually learns
+4. Standard datasets (enwik8, text8) for comparability
+
+Reference BPB values on enwik8:
+- Random (uniform): 8.00 BPB
+- Compress (gzip):  ~2.90 BPB
+- BLT 1B:          ~1.20 BPB
+- BLT 8B:          ~1.00 BPB
+- EvaByte 6.5B:    ~1.10 BPB
+"""
 import torch
 import time
 import os
-import requests
 import math
 import argparse
 from cast_g.model import CASTGModel
+from cast_g.config import get_config
 from token_model import TokenModel
-# Global Configuration
+from datasets import load_byte_dataset, get_batch, estimate_bpb
+
 OUTPUT_DIR = "/kaggle/working" if os.path.exists("/kaggle/working") else "."
 
-# --- Configuration (Inference Benchmark) ---
-CONFIG = {
-    'd_model': 256, 
-    'n_layer': 4,
-    'n_head': 8,
-    'block_size': 1024, # EXTREME SPEED TEST
-    'batch_size': 16,
-    'steps': 100,       # Quick evaluation
-    'load_weights': True
-}
 
-def load_data(lang="en"):
-    path = f"data/data_{lang}.txt"
-    print(f">>> LOADING {lang.upper()} DATASET from {path}...")
+def print_model_specs(name: str, model: torch.nn.Module):
+    """Print honest model specifications."""
+    if hasattr(model, 'count_parameters'):
+        counts = model.count_parameters()
+        print(f"\n📊 {name} SPECS:")
+        for component, n in counts.items():
+            if component != 'total':
+                print(f"  • {component}: {n:,} params")
+        print(f"  • TOTAL: {counts['total']:,} params")
+    else:
+        total = sum(p.numel() for p in model.parameters())
+        print(f"\n📊 {name} SPECS:")
+        print(f"  • Total Parameters: {total:,}")
+    print("-" * 40)
+
+
+def evaluate_bpb(model, data, config, device, n_eval_steps=100, label=""):
+    """
+    Evaluate bits-per-byte on a dataset.
     
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    else:
-        # Fallback if production file is missing
-        print(f">>> Production file {path} missing. Check manager.py.")
-        text = "This is a fallback string for testing purposes only."
-            
-    encoded = text.encode('utf-8')
-    return torch.tensor([b for b in encoded], dtype=torch.long)
-
-def print_model_specs(name, model):
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"\n📊 {name} SPECS:")
-    print(f"  • Parameters: {total_params:,}")
-    if hasattr(model, 'encoder'):
-        print(f"  • Architecture: CAST-G (Byte-Level)")
-    else:
-        print(f"  • Architecture: Token-Baseline")
-    print("-" * 20)
-
-def get_batch(data, batch_size, block_size):
-    # [OPTIMIZATION]: Vectorized indexing for massive speedup
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    offsets = torch.arange(block_size, device=data.device)
-    indices = ix.unsqueeze(1) + offsets.unsqueeze(0)
-    x = data[indices]
-    y = data[indices + 1]
-    return x, y
-
-def run_benchmark(name, model, data, lang_code="en"):
-    print(f"\n>>> INFERENCE PERFORMANCE BATTLE: {name}", flush=True)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = model.to(device)
-    # Load Production Weights (BEFORE compilation to avoid _orig_mod prefix issues)
-    type_str = "cast_g" if "CAST-G" in name else "baseline"
-    weight_file = os.path.join(OUTPUT_DIR, f"{type_str}_{lang_code}_production.pt")
-    
-    if os.path.exists(weight_file):
-        print(f">>> [LOADING] Production Weights: {weight_file}")
-        state_dict = torch.load(weight_file, map_location=device)
-        
-        # SMART PATCH: Handle pos_emb size mismatch
-        if 'pos_emb' in state_dict and 'pos_emb' in model.state_dict():
-            curr_pos_emb = model.state_dict()['pos_emb']
-            if state_dict['pos_emb'].shape != curr_pos_emb.shape:
-                print(f"  [PATCH] Adapting pos_emb from {state_dict['pos_emb'].shape[1]} to {curr_pos_emb.shape[1]} slots...")
-                new_pos_emb = torch.zeros_like(curr_pos_emb)
-                n_src = min(state_dict['pos_emb'].shape[1], curr_pos_emb.shape[1])
-                new_pos_emb[:, :n_src, :] = state_dict['pos_emb'][:, :n_src, :]
-                state_dict['pos_emb'] = new_pos_emb
-        
-        # Load with strict=False to allow for minor architectural variations (like step_count)
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        print(f"⚠️ [WARNING] No weights found for {name}. Using random initialization.")
-
-    # [OPTIMIZATION]: Compile model for inference speedup (AFTER loading weights)
-    if hasattr(torch, 'compile'):
-        print("⚡ Compiling model for inference (mode='reduce-overhead', dynamic=True)...")
-        model = torch.compile(model, mode='reduce-overhead', dynamic=True)
-
-    start_time = time.time()
-    last_metrics = {}
+    This is the standard metric — directly comparable to published results.
+    """
+    model.eval()
+    total_loss = 0.0
+    n_steps = 0
+    block_size = config.get('block_size', 1024)
+    batch_size = config.get('batch_size', 16)
     
     with torch.no_grad():
-        for i in range(CONFIG['steps']):
-            xb, yb = get_batch(data, CONFIG['batch_size'], CONFIG['block_size'])
-            xb, yb = xb.to(device), yb.to(device)
+        for i in range(n_eval_steps):
+            xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
+            
             output = model(xb, yb)
-            
             if isinstance(output, tuple) and len(output) == 3:
-                logits, loss, metrics = output
-                loss_val = loss.item()
-                # CLONE metrics to avoid CUDAGraph overwrite errors
-                last_metrics = {k: (v.detach().clone().item() if torch.is_tensor(v) and v.numel() == 1 else v) for k, v in metrics.items()}
+                _, loss, _ = output
             else:
-                logits, loss = output
-                loss_val = loss.item()
-                last_metrics = {}
-                
-            if i % 20 == 0:
-                print(f"  Eval Step {i:3} | Current Loss: {loss_val:.4f}", flush=True)
+                _, loss = output
             
-    duration = time.time() - start_time
-    # Throughput in Bytes Per Second
-    throughput = (CONFIG['steps'] * CONFIG['batch_size'] * CONFIG['block_size']) / duration
+            if loss is not None:
+                total_loss += loss.item()
+                n_steps += 1
+            
+            if i % 20 == 0:
+                current_bpb = estimate_bpb(total_loss / max(1, n_steps))
+                print(f"  {label} Eval step {i:3d} | Running BPB: {current_bpb:.4f}")
     
-    print(f"\n>>> GENERATION TEST ({name}):")
-    prompt = data[:CONFIG['block_size']].unsqueeze(0)
-    generated_ids = model.generate(prompt, max_new_tokens=100)
-    # Only decode the NEW tokens to avoid showing the shared prompt
-    new_tokens = generated_ids[0, CONFIG['block_size']:]
-    out_bytes = bytes(new_tokens.tolist())
-    print(f"  Generated: {out_bytes.decode('utf-8', errors='replace')}\n", flush=True)
+    model.train()
     
-    return {
-        'loss': last_metrics.get('loss_recon', loss_val), # Use Reconstruction Loss for fair battle
-        'throughput': throughput,
-        'duration': duration,
-        'compression': last_metrics.get('avg_seg_len', 1.0)
-    }
+    avg_loss = total_loss / max(1, n_steps)
+    bpb = estimate_bpb(avg_loss)
+    return bpb, avg_loss
 
-def print_matrix(results):
-    print("\n" + "="*60)
-    print(" " * 15 + "🚀 CAST-G vs BASELINE PERFORMANCE MATRIX")
-    print("="*60)
-    print(f"{'Metric':<20} | {'Baseline (Token)':<18} | {'CAST-G (Killer)':<18}")
-    print("-" * 60)
+
+def measure_throughput(model, data, config, device, n_steps=50):
+    """
+    Measure raw throughput in bytes per second.
     
-    b = results['baseline']
-    c = results['castg']
+    Labeled honestly: this measures how fast the model processes bytes,
+    NOT how well it understands them.
+    """
+    model.eval()
+    block_size = config.get('block_size', 1024)
+    batch_size = config.get('batch_size', 16)
     
-    print(f"{'Throughput (B/s)':<20} | {b['throughput']:>18.2f} | {c['throughput']:>18.2f} ⭐")
-    print(f"{'Compression Ratio':<20} | {'1.00x':>18} | {c['compression']:>17.2f}x ⭐")
-    print(f"{'Training Loss':<20} | {b['loss']:>18.4f} | {c['loss']:>18.4f}")
-    print(f"{'Memory Score':<20} | {'Standard':>18} | {'Jagged-Efficient':>18} ⭐")
-    print("="*60)
-    print("⭐ CAST-G wins on computational efficiency and reasoning density.")
-    print("="*60 + "\n")
+    # Warmup
+    for _ in range(5):
+        xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
+        with torch.no_grad():
+            model(xb, yb)
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    
+    start = time.time()
+    with torch.no_grad():
+        for _ in range(n_steps):
+            xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
+            model(xb, yb)
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    
+    duration = time.time() - start
+    total_bytes = n_steps * batch_size * block_size
+    throughput = total_bytes / duration
+    
+    model.train()
+    return throughput, duration
+
+
+def analyze_segments(model, data, config, device):
+    """
+    Visualize what the hierarchical segmenter actually learns.
+    Shows example segmentations at each level.
+    """
+    if not hasattr(model, 'hierarchy'):
+        print("  (Baseline model — no segmentation)")
+        return
+    
+    model.eval()
+    block_size = config.get('block_size', 1024)
+    
+    # Get a sample
+    x = data[:block_size].unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        h_bytes = model.encoder(x)
+        level_segments, level_boundaries, level_segment_ids, _ = \
+            model.hierarchy(h_bytes, temp=0.1, hard=True)
+    
+    # Decode bytes for display
+    byte_text = bytes(x[0].cpu().tolist()).decode('utf-8', errors='replace')[:200]
+    
+    print(f"\n🔬 SEGMENT ANALYSIS (first 200 bytes):")
+    print(f"  Text: {byte_text[:80]}...")
+    
+    for level_idx, boundaries in enumerate(level_boundaries):
+        n_boundaries = boundaries[0].sum().item()
+        T_level = boundaries.size(1)
+        avg_len = T_level / max(1, n_boundaries)
+        print(f"  Level {level_idx}: {int(n_boundaries)} segments, avg {avg_len:.1f} units/segment")
+    
+    model.train()
+
+
+def run_benchmark(dataset_name: str, config_name: str = 'small'):
+    """Run full benchmark on a dataset."""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    config = get_config(config_name)
+    
+    print(f"\n{'='*60}")
+    print(f"  CAST-G v3 BENCHMARK — {dataset_name.upper()} ({config_name})")
+    print(f"{'='*60}")
+    
+    # Load data
+    print(f"\n>>> Loading {dataset_name} dataset...")
+    if dataset_name in ('enwik8', 'text8'):
+        train_data = load_byte_dataset(dataset_name, split='train')
+        test_data = load_byte_dataset(dataset_name, split='test')
+    else:
+        train_data = load_byte_dataset(dataset_name)
+        test_data = train_data  # No standard split for multilingual
+    
+    print(f"  Train: {len(train_data):,} bytes | Test: {len(test_data):,} bytes")
+    
+    # Initialize models
+    cast_model = CASTGModel(config=config_name).to(device)
+    base_model = TokenModel(
+        vocab_size=256,
+        d_model=config['d_model'],
+        n_layer=config.get('global_n_layer', 4),
+        n_head=config['n_head'],
+        block_size=config['block_size'],
+    ).to(device)
+    
+    print_model_specs("CAST-G v3", cast_model)
+    print_model_specs("Baseline (Token)", base_model)
+    
+    # Load weights if available
+    for name, model, prefix in [
+        ("CAST-G", cast_model, "cast_g"),
+        ("Baseline", base_model, "baseline"),
+    ]:
+        weight_file = os.path.join(OUTPUT_DIR, f"{prefix}_{dataset_name}_production.pt")
+        if os.path.exists(weight_file):
+            print(f">>> Loading weights: {weight_file}")
+            state = torch.load(weight_file, map_location=device)
+            model.load_state_dict(state, strict=False)
+        else:
+            print(f"⚠️ No weights for {name}. Using random init.")
+    
+    # Compile for speed
+    if hasattr(torch, 'compile'):
+        print("⚡ Compiling models (mode='reduce-overhead', dynamic=True)...")
+        try:
+            cast_model = torch.compile(cast_model, mode='reduce-overhead', dynamic=True)
+        except Exception as e:
+            print(f"  CAST-G compile failed (using eager): {e}")
+        try:
+            base_model = torch.compile(base_model, mode='reduce-overhead', dynamic=True)
+        except Exception as e:
+            print(f"  Baseline compile failed (using eager): {e}")
+    
+    # Evaluate BPB (the honest metric)
+    print(f"\n>>> BITS-PER-BYTE EVALUATION ({dataset_name}):")
+    cast_bpb, cast_loss = evaluate_bpb(cast_model, test_data, config, device, label="CAST-G")
+    base_bpb, base_loss = evaluate_bpb(base_model, test_data, config, device, label="Baseline")
+    
+    # Throughput
+    print(f"\n>>> THROUGHPUT MEASUREMENT:")
+    cast_tput, cast_dur = measure_throughput(cast_model, test_data, config, device)
+    base_tput, base_dur = measure_throughput(base_model, test_data, config, device)
+    
+    # Segment analysis
+    print(f"\n>>> SEGMENT ANALYSIS:")
+    m = cast_model._orig_mod if hasattr(cast_model, '_orig_mod') else cast_model
+    analyze_segments(m, test_data, config, device)
+    
+    # Generation test
+    print(f"\n>>> GENERATION TEST:")
+    prompt = test_data[:config['block_size']].unsqueeze(0)
+    for name, model in [("CAST-G", cast_model), ("Baseline", base_model)]:
+        try:
+            generated = model.generate(prompt, max_new_tokens=100)
+            new_tokens = generated[0, config['block_size']:]
+            text = bytes(new_tokens.cpu().tolist()).decode('utf-8', errors='replace')
+            print(f"  {name}: {text[:100]}")
+        except Exception as e:
+            print(f"  {name}: Generation failed — {e}")
+    
+    # Final honest results table
+    print(f"\n{'='*60}")
+    print(f"  📊 HONEST RESULTS — {dataset_name.upper()}")
+    print(f"{'='*60}")
+    print(f"{'Metric':<25} | {'Baseline':<15} | {'CAST-G v3':<15}")
+    print(f"{'-'*60}")
+    print(f"{'Bits-per-Byte (BPB)':<25} | {base_bpb:<15.4f} | {cast_bpb:<15.4f}")
+    print(f"{'Raw CE Loss':<25} | {base_loss:<15.4f} | {cast_loss:<15.4f}")
+    print(f"{'Throughput (B/s)':<25} | {base_tput:<15,.0f} | {cast_tput:<15,.0f}")
+    print(f"{'='*60}")
+    
+    if cast_bpb < base_bpb:
+        print(f"  ✅ CAST-G achieves {base_bpb - cast_bpb:.4f} BPB improvement")
+    else:
+        print(f"  ⚠️ Baseline wins by {cast_bpb - base_bpb:.4f} BPB (model needs more training)")
+    
+    print(f"\n  Reference: BLT-8B achieves ~1.0 BPB on enwik8")
+    print(f"  Reference: Random baseline is 8.0 BPB")
+    print(f"{'='*60}\n")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--lang", type=str, default="en", choices=["en", "hi", "ja", "zh"], help="Dataset language")
+    parser = argparse.ArgumentParser(description="CAST-G v3 Benchmarker")
+    parser.add_argument("--dataset", type=str, default="enwik8",
+                       choices=["enwik8", "text8", "en", "hi", "ja", "zh"],
+                       help="Dataset to benchmark on")
+    parser.add_argument("--config", type=str, default="small",
+                       choices=["small", "medium"],
+                       help="Model configuration")
     args = parser.parse_args()
     
-    data = load_data(lang=args.lang)
-    
-    # Initialize
-    cast_g = CASTGModel(d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'])
-    token = TokenModel(vocab_size=256, d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'], block_size=CONFIG['block_size'])
-    
-    print_model_specs("CAST-G", cast_g)
-    print_model_specs("Baseline", token)
-    
-    c_res = run_benchmark("CAST-G (Modular Hardware-Aware)", cast_g, data, lang_code=args.lang)
-    b_res = run_benchmark("Baseline (Discrete)", token, data, lang_code=args.lang)
-    
-    print_matrix({'castg': c_res, 'baseline': b_res})
-
+    run_benchmark(args.dataset, args.config)
