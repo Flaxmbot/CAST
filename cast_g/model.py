@@ -22,7 +22,7 @@ class CASTGModel(nn.Module):
         self.decoder.proj.weight = self.encoder.embed.weight
         
         self.lagrangian = LagrangianLoss(target_len=8.0)
-        self.step_count = 0 # Track steps for annealing
+        self.register_buffer('step_count', torch.tensor(0, dtype=torch.long)) # Persistent step count for annealing
         
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None):
         # 1. Byte Encoding (O(N) recurrence)
@@ -65,7 +65,8 @@ class CASTGModel(nn.Module):
             l_penalty, avg_len = self.lagrangian(boundaries, idx.size(1))
             
             # C. Dynamic Entropy Annealing (The 'Showcase' Stability Fix)
-            anneal_factor = max(0.0, 1.0 - (self.step_count / 5000))
+            # Use buffer for persistent annealing across restarts
+            anneal_factor = max(0.0, 1.0 - (self.step_count.item() / 5000))
             p = torch.sigmoid(self.boundary_detector.proj(h_bytes))
             p = p.clamp(1e-6, 1.0 - 1e-6) # Clamp for numerical stability
             entropy = -p * torch.log(p) - (1-p) * torch.log(1-p)

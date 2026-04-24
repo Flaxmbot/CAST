@@ -6,6 +6,8 @@ import math
 import argparse
 from cast_g.model import CASTGModel
 from token_model import TokenModel
+# Global Configuration
+OUTPUT_DIR = "/kaggle/working" if os.path.exists("/kaggle/working") else "."
 
 # --- Configuration (Inference Benchmark) ---
 CONFIG = {
@@ -44,20 +46,25 @@ def print_model_specs(name, model):
     print("-" * 20)
 
 def get_batch(data, batch_size, block_size):
+    # [OPTIMIZATION]: Vectorized indexing for massive speedup
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    offsets = torch.arange(block_size, device=data.device)
+    indices = ix.unsqueeze(1) + offsets.unsqueeze(0)
+    x = data[indices]
+    y = data[indices + 1]
     return x, y
 
 def run_benchmark(name, model, data, lang_code="en"):
     print(f"\n>>> INFERENCE PERFORMANCE BATTLE: {name}", flush=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
-    model.eval() # PURE INFERENCE
-    
+    # [OPTIMIZATION]: Compile model for inference speedup
+    if hasattr(torch, 'compile'):
+        model = torch.compile(model)
+        
     # Load Production Weights
     type_str = "cast_g" if "CAST-G" in name else "baseline"
-    weight_file = f"{type_str}_{lang_code}_production.pt"
+    weight_file = os.path.join(OUTPUT_DIR, f"{type_str}_{lang_code}_production.pt")
     
     if os.path.exists(weight_file):
         print(f">>> [LOADING] Production Weights: {weight_file}")

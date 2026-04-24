@@ -6,6 +6,9 @@ from datasets import load_dataset
 from cast_g.model import CASTGModel
 from benchmarker import get_batch
 
+# Global Configuration
+OUTPUT_DIR = "/kaggle/working" if os.path.exists("/kaggle/working") else "."
+
 def setup():
     # Fix Windows console encoding issues
     if sys.platform == "win32":
@@ -19,12 +22,15 @@ def setup():
         return False
     
     print(f"✅ {torch.cuda.device_count()} GPU(s) detected.")
-    # GPU Optimizations
+    
+    # [OPTIMIZATION]: Speed up matmuls on T4/A100
+    torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
         
     # Force path injection
     sys.path.append(os.path.abspath('.'))
     os.makedirs("data", exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     return True
 
 def print_model_specs(name, model):
@@ -99,12 +105,17 @@ def train(lang_code, data_path, steps, batch_size=64):
     print_model_specs("CAST-G (Killer)", cast_model)
     print_model_specs("Token-Baseline", base_model)
     
+    # [OPTIMIZATION]: Wrap in torch.compile for massive speedup (PyTorch 2.0+)
+    if hasattr(torch, 'compile'):
+        print("⚡ Compiling models for maximum performance...")
+        cast_model = torch.compile(cast_model)
+        base_model = torch.compile(base_model)
+    
     # Multi-GPU support
     if torch.cuda.device_count() > 1:
         print(f"⚡ Multi-GPU detected! Wrapping models in DataParallel.")
         cast_model = torch.nn.DataParallel(cast_model)
         base_model = torch.nn.DataParallel(base_model)
-        # Scale batch size for multiple GPUs
         batch_size = batch_size * torch.cuda.device_count()
         print(f"📈 Scaled effective batch size to {batch_size}")
     
@@ -113,19 +124,36 @@ def train(lang_code, data_path, steps, batch_size=64):
     data = torch.tensor([b for b in text.encode('utf-8')], dtype=torch.long)
 
     # 1. TRAIN CAST-G
-    print(f"\n🔥 [1/2] TRAINING CAST-G ({lang_code}) for {steps} steps...")
-    run_loop(cast_model, data, steps, device, f"cast_g_{lang_code}_production.pt", batch_size, show_seg=True)
+    print(f"\n🔥 [1/2] PROCESSING CAST-G ({lang_code})...")
+    cast_save = os.path.join(OUTPUT_DIR, f"cast_g_{lang_code}_production.pt")
+    run_loop(cast_model, data, steps, device, cast_save, batch_size, show_seg=True)
 
     # 2. TRAIN BASELINE
-    print(f"\n🔥 [2/2] TRAINING BASELINE ({lang_code}) for {steps} steps...")
-    run_loop(base_model, data, steps, device, f"baseline_{lang_code}_production.pt", batch_size, show_seg=False)
+    print(f"\n🔥 [2/2] PROCESSING BASELINE ({lang_code})...")
+    base_save = os.path.join(OUTPUT_DIR, f"baseline_{lang_code}_production.pt")
+    run_loop(base_model, data, steps, device, base_save, batch_size, show_seg=False)
 
 def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler('cuda')
     
+    # [RESUME LOGIC]: Load checkpoint if it exists
+    start_step = 0
+    ckpt_path = save_path + ".ckpt"
+    if os.path.exists(ckpt_path):
+        print(f"📦 Resuming from checkpoint: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        start_step = checkpoint['step']
+        # Handle DataParallel/Compiled model state dict loading
+        m = model.module if hasattr(model, 'module') else model
+        m.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if start_step >= steps:
+            print(f"✅ Model already fully trained ({start_step}/{steps} steps). Skipping.")
+            return
+
     model.train()
-    for step in range(steps):
+    for step in range(start_step, steps):
         xb, yb = get_batch(data, batch_size=batch_size, block_size=1024)
         xb, yb = xb.to(device), yb.to(device)
         
@@ -138,7 +166,6 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
                 metrics = {}
         
         optimizer.zero_grad()
-        # [FIX]: Use .mean() for gathered Multi-GPU losses
         actual_loss = loss.mean()
         scaler.scale(actual_loss).backward()
         scaler.unscale_(optimizer)
@@ -148,15 +175,26 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
         
         if step % 100 == 0:
             avg_seg = metrics.get('avg_seg_len', 0.0)
-            # [FIX]: Use .mean() for gathered Multi-GPU metrics
             if torch.is_tensor(avg_seg): avg_seg = avg_seg.mean().item()
             seg_info = f" | Seg: {avg_seg:.2f} bytes" if show_seg else ""
             print(f"  Step {step:5d} | Loss: {actual_loss.item():.4f}{seg_info}")
 
-    # Weights saved as standard state_dict (stripping DataParallel wrapper if present)
-    save_obj = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
-    torch.save(save_obj, save_path)
-    print(f"✅ Weights saved as {save_path}")
+        # [PROGRESS SAVING]: Save checkpoint every 500 steps
+        if (step + 1) % 500 == 0:
+            m = model.module if hasattr(model, 'module') else model
+            ckpt = {
+                'step': step + 1,
+                'model_state_dict': m.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict()
+            }
+            torch.save(ckpt, ckpt_path)
+            print(f"💾 Checkpoint saved at step {step+1}")
+
+    # Final Weights (Production Format)
+    m = model.module if hasattr(model, 'module') else model
+    torch.save(m.state_dict(), save_path)
+    print(f"✅ Production weights saved to {save_path}")
+    if os.path.exists(ckpt_path): os.remove(ckpt_path) # Cleanup
 
 def main():
     if not setup(): return
