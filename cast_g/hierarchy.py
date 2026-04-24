@@ -143,9 +143,9 @@ class HierarchicalSegmenter(nn.Module):
             for i in range(n_levels)
         ])
         
-        # Per-level segmentation losses
+        # Per-level segmentation losses (conservative: seg loss must never dominate recon)
         self.seg_losses = nn.ModuleList([
-            MISegmentationLoss(target_len=tl, mi_weight=0.1, lagrangian_lr=0.01)
+            MISegmentationLoss(target_len=tl, mi_weight=0.05, lagrangian_lr=0.001)
             for tl in self.target_lengths
         ])
         

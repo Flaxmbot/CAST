@@ -209,16 +209,17 @@ class AdaptiveLagrangian(nn.Module):
     
     This converges to the correct compression ratio automatically.
     """
-    def __init__(self, target_len: float = 8.0, lambda_lr: float = 0.01):
+    def __init__(self, target_len: float = 8.0, lambda_lr: float = 0.001):
         super().__init__()
         self.target_len = target_len
         self.lambda_lr = lambda_lr
-        # Log-space λ for positivity — start SMALL to avoid dominating recon loss
-        self.register_buffer('log_lambda', torch.tensor(-4.0))  # λ ≈ 0.018
+        # Log-space λ — start very small
+        self.register_buffer('log_lambda', torch.tensor(-5.0))  # λ ≈ 0.007
         
     @property
     def lam(self) -> torch.Tensor:
-        return torch.exp(self.log_lambda).clamp(min=1e-4, max=10.0)
+        # Tight clamp: max λ ≈ 1.65 — seg loss can never exceed ~1.65x violation
+        return torch.exp(self.log_lambda).clamp(min=1e-4, max=2.0)
     
     def forward(self, boundaries: torch.Tensor, total_bytes: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -239,17 +240,17 @@ class AdaptiveLagrangian(nn.Module):
         # Normalized constraint violation (divided by target for scale-invariance)
         violation = (avg_len - self.target_len) / self.target_len
         
-        # Lagrangian penalty: λ * violation^2 (normalized)
-        penalty = self.lam * violation.pow(2)
+        # Penalty on normalized violation — capped so seg loss never exceeds recon
+        penalty = self.lam * violation.pow(2).clamp(max=1.0)
         
-        # Dual gradient ascent: update λ based on violation
-        # λ ← λ * exp(lr * violation)  (increase λ if constraint violated)
+        # Proper dual ascent: λ UP when segments too short (need fewer boundaries),
+        # λ DOWN when constraint is roughly satisfied (|violation| < 0.1)
         if self.training:
             with torch.no_grad():
-                # Use absolute violation to increase λ when off-target
-                self.log_lambda.add_(self.lambda_lr * violation.abs().detach())
-                # Clamp for stability
-                self.log_lambda.clamp_(-5.0, 3.0)
+                # Signed update: positive violation → increase λ, negative → decrease
+                self.log_lambda.add_(self.lambda_lr * violation.detach())
+                # Tight clamp: [-5, 0.5] → λ in [0.007, 1.65]
+                self.log_lambda.clamp_(-5.0, 0.5)
         
         return penalty, avg_len
 
