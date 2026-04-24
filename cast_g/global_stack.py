@@ -57,11 +57,7 @@ def pool_jagged(h_bytes: torch.Tensor, boundaries: torch.Tensor):
     
     # Generate segment IDs using parallel prefix sum
     segment_ids = torch.cumsum(boundaries, dim=1).long()
-    
-    # [FIX]: Avoid .item() to prevent graph breaks and CPU bottlenecks.
-    # Using T as a safe fixed upper bound allows torch.compile to fuse 
-    # the entire operation without host-device synchronization.
-    max_segments = T 
+    max_segments = segment_ids.max().item() + 1
     
     # Absolute DType Unification for GPU stability
     pooled = torch.zeros(B, max_segments, D, device=device, dtype=h_bytes.dtype)

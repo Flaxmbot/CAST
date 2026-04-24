@@ -20,8 +20,6 @@ def setup():
     
     # GPU Optimizations
     torch.backends.cudnn.benchmark = True
-    if hasattr(torch, 'compile'):
-        print("⚡ Enabling torch.compile for maximum throughput...")
         
     # Force path injection
     sys.path.append(os.path.abspath('.'))
@@ -74,14 +72,6 @@ def train(lang_code, data_path, steps, batch_size=64):
     cast_model = CASTGModel(d_model=256, n_layer=4, n_head=8).to(device)
     base_model = TokenModel(vocab_size=256, d_model=256, n_layer=4, n_head=8, block_size=1024).to(device)
     
-    # Apply torch.compile if available
-    if hasattr(torch, 'compile'):
-        try:
-            cast_model = torch.compile(cast_model)
-            print("✨ CAST-G Compiled.")
-        except:
-            print("⚠️ Compilation skipped.")
-
     with open(data_path, "r", encoding="utf-8") as f:
         text = f.read()
     data = torch.tensor([b for b in text.encode('utf-8')], dtype=torch.long)
@@ -124,11 +114,8 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
             seg_info = f" | Seg: {avg_seg:.2f} bytes" if show_seg else ""
             print(f"  Step {step:5d} | Loss: {loss.item():.4f}{seg_info}")
 
-    # Handle compiled model saving
-    if hasattr(model, '_orig_mod'):
-        torch.save(model._orig_mod.state_dict(), save_path)
-    else:
-        torch.save(model.state_dict(), save_path)
+    # Weights saved as standard state_dict
+    torch.save(model.state_dict(), save_path)
     print(f"✅ Weights saved as {save_path}")
 
 def main():
