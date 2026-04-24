@@ -33,6 +33,16 @@ def load_data(lang="en"):
     encoded = text.encode('utf-8')
     return torch.tensor([b for b in encoded], dtype=torch.long)
 
+def print_model_specs(name, model):
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n📊 {name} SPECS:")
+    print(f"  • Parameters: {total_params:,}")
+    if hasattr(model, 'encoder'):
+        print(f"  • Architecture: CAST-G (Byte-Level)")
+    else:
+        print(f"  • Architecture: Token-Baseline")
+    print("-" * 20)
+
 def get_batch(data, batch_size, block_size):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i+block_size] for i in ix])
@@ -129,6 +139,9 @@ if __name__ == "__main__":
     # Initialize
     cast_g = CASTGModel(d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'])
     token = TokenModel(vocab_size=256, d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'], block_size=CONFIG['block_size'])
+    
+    print_model_specs("CAST-G", cast_g)
+    print_model_specs("Baseline", token)
     
     c_res = run_benchmark("CAST-G (Modular Hardware-Aware)", cast_g, data, lang_code=args.lang)
     b_res = run_benchmark("Baseline (Discrete)", token, data, lang_code=args.lang)

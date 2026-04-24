@@ -27,6 +27,25 @@ def setup():
     os.makedirs("data", exist_ok=True)
     return True
 
+def print_model_specs(name, model):
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\n📊 {name} ARCHITECTURE SPECS:")
+    print(f"  • Total Parameters: {total_params:,}")
+    print(f"  • Trainable Params: {trainable_params:,}")
+    
+    # Introspect for specific CAST-G components
+    m = model.module if hasattr(model, 'module') else model
+    if hasattr(m, 'encoder'):
+        print(f"  • Type: Byte-Level Modular (CAST-G)")
+        print(f"  • Stride Reduction: 4x (ConvStem)")
+        print(f"  • Global Reasoning: {m.global_stack.transformer.layers[0].self_attn.num_heads} Heads, {len(m.global_stack.transformer.layers)} Layers")
+    else:
+        print(f"  • Type: Discrete Token Baseline")
+        print(f"  • Vocabulary: 256 (Raw Bytes)")
+    print(f"  • Device Alignment: {next(model.parameters()).device}")
+    print("-" * 30)
+
 def download_data(lang_code):
     path = f"data/data_{lang_code}.txt"
     if os.path.exists(path):
@@ -72,6 +91,10 @@ def train(lang_code, data_path, steps, batch_size=64):
     # Initialize both models
     cast_model = CASTGModel(d_model=256, n_layer=4, n_head=8).to(device)
     base_model = TokenModel(vocab_size=256, d_model=256, n_layer=4, n_head=8, block_size=1024).to(device)
+    
+    # Report Specs
+    print_model_specs("CAST-G (Killer)", cast_model)
+    print_model_specs("Token-Baseline", base_model)
     
     # Multi-GPU support
     if torch.cuda.device_count() > 1:
