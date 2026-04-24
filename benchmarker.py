@@ -96,12 +96,17 @@ def run_benchmark(name, model, data, lang_code="en"):
             output = model(xb, yb)
             
             if isinstance(output, tuple) and len(output) == 3:
-                logits, loss, last_metrics = output
+                logits, loss, metrics = output
+                loss_val = loss.item()
+                # CLONE metrics to avoid CUDAGraph overwrite errors
+                last_metrics = {k: (v.detach().clone().item() if torch.is_tensor(v) and v.numel() == 1 else v) for k, v in metrics.items()}
             else:
                 logits, loss = output
+                loss_val = loss.item()
+                last_metrics = {}
                 
             if i % 20 == 0:
-                print(f"  Eval Step {i:3} | Current Loss: {loss.item():.4f}", flush=True)
+                print(f"  Eval Step {i:3} | Current Loss: {loss_val:.4f}", flush=True)
             
     duration = time.time() - start_time
     # Throughput in Bytes Per Second
@@ -109,12 +114,14 @@ def run_benchmark(name, model, data, lang_code="en"):
     
     print(f"\n>>> GENERATION TEST ({name}):")
     prompt = data[:CONFIG['block_size']].unsqueeze(0)
-    generated_ids = model.generate(prompt, max_new_tokens=40)
-    out_bytes = bytes(generated_ids[0].tolist())
-    print(f"  Result: {out_bytes.decode('utf-8', errors='replace')}\n", flush=True)
+    generated_ids = model.generate(prompt, max_new_tokens=100)
+    # Only decode the NEW tokens to avoid showing the shared prompt
+    new_tokens = generated_ids[0, CONFIG['block_size']:]
+    out_bytes = bytes(new_tokens.tolist())
+    print(f"  Generated: {out_bytes.decode('utf-8', errors='replace')}\n", flush=True)
     
     return {
-        'loss': last_metrics.get('loss_recon', loss.item()), # Use Reconstruction Loss for fair battle
+        'loss': last_metrics.get('loss_recon', loss_val), # Use Reconstruction Loss for fair battle
         'throughput': throughput,
         'duration': duration,
         'compression': last_metrics.get('avg_seg_len', 1.0)
