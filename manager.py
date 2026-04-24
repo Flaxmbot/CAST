@@ -95,6 +95,13 @@ def train(dataset_name, config_name, steps, batch_size=None):
     if batch_size is not None:
         config['batch_size'] = batch_size
     
+    # Skip check — avoid loading data if both models are done
+    cast_save = os.path.join(OUTPUT_DIR, f"cast_g_{dataset_name}_production.pt")
+    base_save = os.path.join(OUTPUT_DIR, f"baseline_{dataset_name}_production.pt")
+    if os.path.exists(cast_save) and os.path.exists(base_save):
+        print(f"✅ Both production models exist for {dataset_name}. Skipping.")
+        return
+
     # Load data
     print(f"\n>>> Loading {dataset_name} dataset...")
     if dataset_name in ('enwik8', 'text8'):
@@ -151,12 +158,10 @@ def train(dataset_name, config_name, steps, batch_size=None):
     
     # Train CAST-G
     print(f"\n🔥 [1/2] TRAINING CAST-G ({dataset_name}, {config_name})...")
-    cast_save = os.path.join(OUTPUT_DIR, f"cast_g_{dataset_name}_production.pt")
     _train_loop(cast_model, data, steps, device, cast_save, effective_batch, config, is_cast=True)
     
     # Train Baseline
     print(f"\n🔥 [2/2] TRAINING BASELINE ({dataset_name})...")
-    base_save = os.path.join(OUTPUT_DIR, f"baseline_{dataset_name}_production.pt")
     _train_loop(base_model, data, steps, device, base_save, effective_batch, config, is_cast=False)
 
 

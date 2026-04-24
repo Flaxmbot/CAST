@@ -201,12 +201,18 @@ def run_benchmark(dataset_name: str, config_name: str = 'small'):
         ("Baseline", base_model, "baseline"),
     ]:
         weight_file = os.path.join(OUTPUT_DIR, f"{prefix}_{dataset_name}_production.pt")
+        ckpt_file = weight_file + ".ckpt"
+        
         if os.path.exists(weight_file):
-            print(f">>> Loading weights: {weight_file}")
+            print(f">>> Loading production weights: {weight_file}")
             state = torch.load(weight_file, map_location=device)
             model.load_state_dict(state, strict=False)
+        elif os.path.exists(ckpt_file):
+            print(f">>> Loading checkpoint: {ckpt_file}")
+            checkpoint = torch.load(ckpt_file, map_location=device, weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         else:
-            print(f"⚠️ No weights for {name}. Using random init.")
+            print(f"⚠️ No weights or checkpoint for {name}. Using random init.")
     
     # Compile for speed
     if hasattr(torch, 'compile'):
