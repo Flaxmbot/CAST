@@ -80,8 +80,8 @@ class CASTGModel(nn.Module):
             self.step_count += 1
             
             metrics['avg_seg_len'] = avg_len
-            metrics['importance_sparsity'] = 1.0 - importance_gate.mean().item()
-            metrics['loss_recon'] = loss_recon.item()
+            metrics['importance_sparsity'] = 1.0 - importance_gate.mean()
+            metrics['loss_recon'] = loss_recon
             
         return logits, loss, metrics
 

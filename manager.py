@@ -119,7 +119,9 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
         scaler.update()
         
         if step % 100 == 0:
-            seg_info = f" | Seg: {metrics.get('avg_seg_len', 0.0):.2f} bytes" if show_seg else ""
+            avg_seg = metrics.get('avg_seg_len', 0.0)
+            if torch.is_tensor(avg_seg): avg_seg = avg_seg.item()
+            seg_info = f" | Seg: {avg_seg:.2f} bytes" if show_seg else ""
             print(f"  Step {step:5d} | Loss: {loss.item():.4f}{seg_info}")
 
     # Handle compiled model saving

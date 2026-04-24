@@ -44,4 +44,4 @@ class LagrangianLoss:
         
         # We use a squared penalty for smoother gradients
         penalty = (avg_len - self.target_len)**2
-        return self.lam * penalty, avg_len.item()
+        return self.lam * penalty, avg_len # Return as tensor to avoid graph break
