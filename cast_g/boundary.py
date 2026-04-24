@@ -66,91 +66,75 @@ class MIBoundaryDetector(nn.Module):
         
     def _compute_context_windows(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute left and right context representations at each position
-        using a sliding window.
+        Compute causal left and right context representations at each position.
         
         Args:
             h: [B, T, D] — byte-level hidden states
             
         Returns:
-            left_ctx: [B, T, D//2] — left context encoding
-            right_ctx: [B, T, D//2] — right context encoding
+            left_ctx: [B, T, D//2] — past context encoding
+            right_ctx: [B, T, D//2] — near-past context encoding
         """
         B, T, D = h.shape
         w = self.window_size
         
-        # Pad for window extraction
-        h_padded = F.pad(h, (0, 0, w, w), mode='constant', value=0)  # [B, T+2w, D]
-        
-        # Left context: average of positions [t-w, t) 
-        # Right context: average of positions [t, t+w)
-        left_windows = []
-        right_windows = []
-        
-        # Efficient implementation using unfold
-        # h_padded[:, :, :] has positions 0..T+2w-1
-        # For original position t (0-indexed), padded position is t+w
-        # Left window: padded positions [t+w-w, t+w) = [t, t+w)
-        # Right window: padded positions [t+w, t+w+w) = [t+w, t+2w)
+        # Pad for causal window extraction (only on the left)
+        # Pad with 2w zeros on the left so we can always look back 2w
+        h_padded = F.pad(h, (0, 0, 2*w, 0), mode='constant', value=0)  # [B, T+2w, D]
         
         # Use avg_pool1d for efficient windowed averaging
         h_t = h_padded.transpose(1, 2)  # [B, D, T+2w]
-        
-        # Average pool with window_size, stride 1
         pooled = F.avg_pool1d(h_t, kernel_size=w, stride=1, padding=0)  # [B, D, T+w+1]
         pooled = pooled.transpose(1, 2)  # [B, T+w+1, D]
         
-        # Left context at position t: pooled[:, t, :] = avg of padded[t..t+w-1]
-        # Right context at position t: pooled[:, t+1, :] if we shift
-        # Actually: left = avg(h[t-w:t]), right = avg(h[t:t+w])
-        # In padded coords: left = avg(padded[t:t+w]), right = avg(padded[t+w:t+2w])
-        # pooled[t] = avg(padded[t:t+w])
-        # So: left_ctx[t] = pooled[t], right_ctx[t] = pooled[t+w]
-        # But pooled has T+w+1 positions, we need T positions
+        # Original position t is now at index t+2w in h_padded.
+        # Window of size w ending at t-1 (padded t+2w-1) is [t+w, t+2w)
+        # pooled[i] is avg of padded[i : i+w]
+        # For original t, we want:
+        # Near-past (Right): avg(padded[t+w : t+2w]) = pooled[t+w]
+        # Distant-past (Left): avg(padded[t : t+w]) = pooled[t]
         
-        left_ctx = pooled[:, :T, :]     # [B, T, D] — avg of left windows
-        right_ctx = pooled[:, w:w+T, :] if pooled.size(1) > w+T-1 else pooled[:, -T:, :]
+        left_ctx = pooled[:, :T, :]      # [B, T, D]
+        right_ctx = pooled[:, w:w+T, :]  # [B, T, D]
         
-        # Clamp to ensure exactly T positions
-        left_ctx = left_ctx[:, :T, :]
-        right_ctx = right_ctx[:, :T, :]
+        # Project and NORMALIZE to prevent gradient explosion
+        left_ctx = self.left_encoder(left_ctx)
+        right_ctx = self.right_encoder(right_ctx)
         
-        # Project to MI space
-        left_ctx = self.left_encoder(left_ctx)   # [B, T, D//2]
-        right_ctx = self.right_encoder(right_ctx) # [B, T, D//2]
+        # Normalize for stable dot product (cosine similarity space)
+        left_ctx = F.normalize(left_ctx, dim=-1)
+        right_ctx = F.normalize(right_ctx, dim=-1)
         
         return left_ctx, right_ctx
     
-    def estimate_mi(self, h: torch.Tensor) -> torch.Tensor:
+    def estimate_mi(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Estimate pointwise MI at each position using InfoNCE scoring.
-        
-        Higher MI = left and right contexts are mutually informative = NOT a boundary.
-        Lower MI = contexts are independent = good boundary location.
-        
-        Args:
-            h: [B, T, D]
-            
-        Returns:
-            mi_scores: [B, T] — estimated MI at each position
+        Compute MI estimates and InfoNCE auxiliary loss.
         """
         left_ctx, right_ctx = self._compute_context_windows(h)
-        
-        # Bilinear MI score: f(l, r) = l^T W r
-        # This is a simplified InfoNCE: MI ≥ log(N) - L_InfoNCE
-        projected_left = self.mi_proj(left_ctx)  # [B, T, D//2]
+        # already normalized in _compute_context_windows
         
         # Pointwise MI estimate via dot product
-        mi_scores = (projected_left * right_ctx).sum(dim=-1)  # [B, T]
+        mi_scores = (left_ctx * right_ctx).sum(dim=-1)  # [B, T]
         
-        return mi_scores
+        # InfoNCE Loss: contrast true pair (left_t, right_t) against others
+        if self.training:
+            B, T, D = left_ctx.shape
+            # [B, T, D] @ [B, D, T] -> [B, T, T]
+            logits = torch.matmul(left_ctx, right_ctx.transpose(1, 2)) / 0.07
+            labels = torch.arange(T, device=h.device).repeat(B)
+            infonce_loss = F.cross_entropy(logits.view(-1, T), labels)
+        else:
+            infonce_loss = torch.tensor(0.0, device=h.device)
+            
+        return mi_scores, infonce_loss
     
     def forward(
         self, 
         h: torch.Tensor, 
         temp: float = 1.0, 
         hard: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict segment boundaries based on MI estimates.
         
@@ -161,9 +145,10 @@ class MIBoundaryDetector(nn.Module):
             
         Returns:
             boundaries: [B, T] — binary boundary mask
-            mi_scores: [B, T] — raw MI estimates (for loss computation)
+            mi_scores: [B, T] — raw MI estimates (for alignment loss)
+            infonce_loss: scalar MI estimation loss
         """
-        mi_scores = self.estimate_mi(h)  # [B, T]
+        mi_scores, infonce_loss = self.estimate_mi(h)  # [B, T], scalar
         
         # Boundary logit: low MI → high boundary probability
         # boundary_logit = threshold - mi_score
@@ -193,7 +178,7 @@ class MIBoundaryDetector(nn.Module):
         boundaries = boundaries.clone()
         boundaries[:, 0] = 1.0
         
-        return boundaries, mi_scores
+        return boundaries, mi_scores, infonce_loss
 
 
 class AdaptiveLagrangian(nn.Module):

@@ -72,7 +72,7 @@ class CrossLevelAttention(nn.Module):
         k = k_proj(kv_input).view(B, S_kv, self.n_head, self.head_dim).transpose(1, 2)
         v = v_proj(kv_input).view(B, S_kv, self.n_head, self.head_dim).transpose(1, 2)
         
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, S_q, self.d_model)
         return self.dropout(out_proj(out))
     
@@ -203,7 +203,7 @@ class HierarchicalSegmenter(nn.Module):
         # Bottom-up: build segments at each level
         for level in range(self.n_levels):
             # Predict boundaries at this level
-            boundaries, mi_scores = self.boundary_detectors[level](current_repr, temp=temp, hard=hard)
+            boundaries, mi_scores, infonce_loss = self.boundary_detectors[level](current_repr, temp=temp, hard=hard)
             
             # Convert to segment IDs
             segment_ids = boundaries_to_segment_ids(boundaries)
@@ -216,7 +216,7 @@ class HierarchicalSegmenter(nn.Module):
             
             # Compute segmentation loss
             seg_loss, seg_metrics = self.seg_losses[level](boundaries, mi_scores, current_T)
-            total_seg_loss = total_seg_loss + seg_loss
+            total_seg_loss = total_seg_loss + seg_loss + infonce_loss
             
             # Store results
             level_segments.append(pooled)
@@ -234,15 +234,16 @@ class HierarchicalSegmenter(nn.Module):
             current_T = avg_segs
         
         # Top-down refinement via cross-level attention
-        # Process from coarsest to finest
-        for i in range(self.n_levels - 2, -1, -1):
-            fine = level_segments[i]
-            coarse = level_segments[i + 1]
-            
-            # Cross-level attention (bidirectional)
-            fine_updated, coarse_updated = self.cross_level[i](fine, coarse)
-            level_segments[i] = fine_updated
-            level_segments[i + 1] = coarse_updated
+        # DISABLED in v3.1 due to causality leakage. 
+        # TODO: Re-implement with segment-aware causal masking.
+        # for i in range(self.n_levels - 2, -1, -1):
+        #     fine = level_segments[i]
+        #     coarse = level_segments[i + 1]
+        #     
+        #     # Cross-level attention (bidirectional)
+        #     fine_updated, coarse_updated = self.cross_level[i](fine, coarse)
+        #     level_segments[i] = fine_updated
+        #     level_segments[i + 1] = coarse_updated
         
         all_metrics['total_seg_loss'] = total_seg_loss
         

@@ -92,6 +92,9 @@ class CASTGModel(nn.Module):
             dropout=dropout,
         )
         
+        # 5. Global Start Token (for causality shift)
+        self.start_seg = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        
         # Training state
         self.register_buffer('step_count', torch.tensor(0, dtype=torch.long))
         
@@ -138,14 +141,20 @@ class CASTGModel(nn.Module):
             self.hierarchy(h_bytes, temp=temp, hard=True)
         
         # 3. Global reasoning on Level 0 (finest) segments
-        # Level 0 has the most segments and finest granularity
         fine_segments = level_segments[0]
         fine_segment_ids = level_segment_ids[0]  # [B, T_encoded]
         h_global, mod_metrics = self.global_stack(fine_segments)
         
-        # 4. Decode: unpool segments → upsample → byte logits
-        # Uses segment_ids for EXACT position alignment (no blind padding)
-        logits = self.decoder(h_global, fine_segment_ids, T_encoded, T)
+        # 4. Strict Causality Shift (CRITICAL FIX)
+        # To predict bytes in segment k, we must only use h_global[k-1].
+        # Otherwise, predicting byte t in segment k leaks future bytes in k.
+        # We prepend a learned <start> token and shift everything right.
+        B_g, S_g, D_g = h_global.shape
+        h_shifted = torch.cat([self.start_seg.expand(B_g, -1, -1), h_global[:, :-1, :]], dim=1)
+        
+        # 5. Decode: unpool segments → upsample → byte logits
+        # Uses segment_ids for EXACT position alignment
+        logits = self.decoder(h_shifted, fine_segment_ids, T_encoded, T)
         
         # 6. Loss computation
         loss = None

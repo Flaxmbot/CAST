@@ -187,10 +187,14 @@ class MoDTransformerStack(nn.Module):
         n_layer: int,
         capacity_ratio: float = 0.5,
         dropout: float = 0.1,
+        max_seq_len: int = 1024,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_layer = n_layer
+        
+        # Positional Embeddings (learned)
+        self.pos_emb = nn.Parameter(torch.zeros(1, max_seq_len, d_model))
         
         self.layers = nn.ModuleList([
             CausalTransformerBlock(d_model, n_head, dropout=dropout)
@@ -215,35 +219,23 @@ class MoDTransformerStack(nn.Module):
             metrics: dict with routing statistics
         """
         B, S, D = x.shape
+        
+        # Add positional embeddings (causal-safe since segments are in order)
+        x = x + self.pos_emb[:, :S, :]
+        
         total_aux_loss = torch.tensor(0.0, device=x.device)
         total_routed_fraction = torch.tensor(0.0, device=x.device)
         
         for layer_idx in range(self.n_layer):
-            router = self.routers[layer_idx]
             transformer = self.layers[layer_idx]
+            # Process ALL segments sequentially (causal attention within layer)
+            x = transformer(x)
             
-            # Route: select top-k segments
-            selected, indices, scores = router(x)
-            
-            # Process selected segments through Transformer
-            processed = transformer(selected)
-            
-            # Scatter back: replace selected positions, keep others via residual
-            # Create output as copy of input (residual for non-selected)
-            output = x.clone()
-            output.scatter_(1, indices.unsqueeze(-1).expand(-1, -1, D), processed)
-            
-            x = output
-            
-            # Accumulate auxiliary loss
-            total_aux_loss = total_aux_loss + router.compute_aux_loss(scores)
-            total_routed_fraction = total_routed_fraction + (scores > 0).float().mean()
-        
         x = self.final_norm(x)
         
         metrics = {
-            'mod_aux_loss': total_aux_loss,
-            'mod_routed_fraction': total_routed_fraction / max(1, self.n_layer),
+            'mod_aux_loss': torch.tensor(0.0, device=x.device),
+            'mod_routed_fraction': torch.tensor(1.0, device=x.device),
         }
         
         return x, metrics
