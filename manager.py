@@ -40,9 +40,12 @@ def print_model_specs(name, model):
         print(f"  • Type: Byte-Level Modular (CAST-G)")
         print(f"  • Stride Reduction: 4x (ConvStem)")
         print(f"  • Global Reasoning: {m.global_stack.transformer.layers[0].self_attn.num_heads} Heads, {len(m.global_stack.transformer.layers)} Layers")
+        print(f"  • Latent Dim: {m.encoder.embed.embedding_dim}")
     else:
         print(f"  • Type: Discrete Token Baseline")
         print(f"  • Vocabulary: 256 (Raw Bytes)")
+        print(f"  • Block Size: {m.block_size}")
+        print(f"  • Embedding Dim: {m.token_embedding.embedding_dim}")
     print(f"  • Device Alignment: {next(model.parameters()).device}")
     print("-" * 30)
 
@@ -135,7 +138,9 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
                 metrics = {}
         
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
+        # [FIX]: Use .mean() for gathered Multi-GPU losses
+        actual_loss = loss.mean()
+        scaler.scale(actual_loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
@@ -143,9 +148,10 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
         
         if step % 100 == 0:
             avg_seg = metrics.get('avg_seg_len', 0.0)
-            if torch.is_tensor(avg_seg): avg_seg = avg_seg.item()
+            # [FIX]: Use .mean() for gathered Multi-GPU metrics
+            if torch.is_tensor(avg_seg): avg_seg = avg_seg.mean().item()
             seg_info = f" | Seg: {avg_seg:.2f} bytes" if show_seg else ""
-            print(f"  Step {step:5d} | Loss: {loss.item():.4f}{seg_info}")
+            print(f"  Step {step:5d} | Loss: {actual_loss.item():.4f}{seg_info}")
 
     # Weights saved as standard state_dict (stripping DataParallel wrapper if present)
     save_obj = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
