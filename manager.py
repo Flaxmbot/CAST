@@ -26,6 +26,10 @@ def setup():
     # [OPTIMIZATION]: Speed up matmuls on T4/A100
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
+    
+    # Suppress noisy DataParallel warnings about scalar gathering
+    import warnings
+    warnings.filterwarnings("ignore", message="Was asked to gather along dimension 0, but all input tensors were scalars")
         
     # Force path injection
     sys.path.append(os.path.abspath('.'))
@@ -152,9 +156,16 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler('cuda')
     
-    # [RESUME LOGIC]: Load checkpoint if it exists
+    # [RESUME LOGIC]: Load production weights or checkpoint if they exist
     start_step = 0
     ckpt_path = save_path + ".ckpt"
+    
+    # 1. If production weights exist, the model is fully trained. Skip.
+    if os.path.exists(save_path):
+        print(f"✅ Production weights already exist: {save_path}. Skipping training.")
+        return
+
+    # 2. If a checkpoint exists, resume from the last saved step.
     if os.path.exists(ckpt_path):
         print(f"📦 Resuming from checkpoint: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=device)
@@ -164,6 +175,7 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if start_step >= steps:
             print(f"✅ Model already fully trained ({start_step}/{steps} steps). Skipping.")
+            if os.path.exists(ckpt_path): os.remove(ckpt_path)
             return
 
     model.train()
