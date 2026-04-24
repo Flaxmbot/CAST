@@ -296,14 +296,20 @@ class MISegmentationLoss(nn.Module):
         """
         # 1. MI-boundary alignment loss
         # Boundaries should align with LOW MI positions
-        # Loss = mean(boundary_prob * mi_score) — encourages boundaries where MI is low
-        # Plus: mean((1 - boundary_prob) * relu(-mi_score)) — encourages non-boundaries where MI is high
-        mi_loss = (boundaries * mi_scores).mean() - 0.5 * ((1 - boundaries) * F.relu(mi_scores)).mean()
+        # Use detached MI scores: the MI estimator is trained by InfoNCE inside
+        # estimate_mi(), not by this loss. Without detach, the gradient pushes
+        # mi_scores to extreme values → loss diverges to -inf.
+        mi_detached = mi_scores.detach()
+        
+        # Loss = mean(boundary * |mi|) — minimized when boundaries coincide with
+        # near-zero MI (semantic discontinuities). Using abs() prevents the loss
+        # from going negative when MI scores are negative.
+        mi_loss = (boundaries * mi_detached.abs()).mean()
         
         # 2. Lagrangian constraint
         lag_penalty, avg_len = self.lagrangian(boundaries, total_bytes)
         
-        # Combined loss
+        # Combined loss (always non-negative)
         loss = self.mi_weight * mi_loss + lag_penalty
         
         metrics = {
