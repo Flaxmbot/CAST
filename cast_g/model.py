@@ -40,23 +40,18 @@ class CASTGModel(nn.Module):
         # 4. Byte Decoding (Direct from Transformer output)
         logits = self.decoder(h_global)
         
+        # Calculate segment_ids for accurate upsampling and Lagrangian loss
+        segment_ids = torch.cumsum(boundaries, dim=1).long()
+        
         loss = None
         metrics = {}
         if targets is not None:
             # A. Reconstruction Loss (Fidelity)
-            # IMPORTANT: We upsample the Logits (S) to match the Full Targets (T).
-            # This ensures every byte in the sequence provides a gradient signal.
-            B, S, V = logits.shape
-            T_original = targets.size(1)
+            # [FIX]: Use precise gathering instead of interpolation for multi-GPU stability.
+            # This perfectly maps each byte's prediction to its segment.
+            logits_upsampled = logits.gather(1, segment_ids.unsqueeze(-1).expand(-1, -1, 256))
             
-            # [B, S, V] -> [B, V, S] -> Interpolate -> [B, V, T] -> [B, T, V]
-            logits_upsampled = F.interpolate(
-                logits.transpose(1, 2), 
-                size=T_original, 
-                mode='nearest'
-            ).transpose(1, 2)
-            
-            # Now shapes match: [B*T, 256] and [B*T]
+            # Now shapes match: [B, T, 256] and [B, T]
             loss_recon = F.cross_entropy(
                 logits_upsampled.reshape(-1, 256), 
                 targets.reshape(-1)

@@ -57,7 +57,11 @@ def pool_jagged(h_bytes: torch.Tensor, boundaries: torch.Tensor):
     
     # Generate segment IDs using parallel prefix sum
     segment_ids = torch.cumsum(boundaries, dim=1).long()
-    max_segments = segment_ids.max().item() + 1
+    
+    # [MULTI-GPU FIX]: DataParallel requires consistent shapes across GPUs.
+    # Different GPUs will find different numbers of segments, so we use 
+    # a fixed upper bound (T) to ensure the 'gather' operation succeeds.
+    max_segments = T 
     
     # Absolute DType Unification for GPU stability
     pooled = torch.zeros(B, max_segments, D, device=device, dtype=h_bytes.dtype)
