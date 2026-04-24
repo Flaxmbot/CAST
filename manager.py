@@ -120,9 +120,9 @@ def train(lang_code, data_path, steps, batch_size=64):
     # [OPTIMIZATION]: Wrap in torch.compile for massive speedup (PyTorch 2.0+)
     # We compile the wrapped model to ensure all replicas are optimized correctly
     if hasattr(torch, 'compile'):
-        print("⚡ Compiling models for maximum performance...")
-        cast_model = torch.compile(cast_model)
-        base_model = torch.compile(base_model)
+        print("⚡ Compiling models (mode='reduce-overhead', dynamic=True)...")
+        cast_model = torch.compile(cast_model, mode='reduce-overhead', dynamic=True)
+        base_model = torch.compile(base_model, mode='reduce-overhead', dynamic=True)
     
     with open(data_path, "r", encoding="utf-8") as f:
         text = f.read()

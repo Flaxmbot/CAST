@@ -83,7 +83,8 @@ def run_benchmark(name, model, data, lang_code="en"):
 
     # [OPTIMIZATION]: Compile model for inference speedup (AFTER loading weights)
     if hasattr(torch, 'compile'):
-        model = torch.compile(model)
+        print("⚡ Compiling model for inference (mode='reduce-overhead', dynamic=True)...")
+        model = torch.compile(model, mode='reduce-overhead', dynamic=True)
 
     start_time = time.time()
     last_metrics = {}

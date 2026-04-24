@@ -66,8 +66,12 @@ class CASTGModel(nn.Module):
             
             # C. Dynamic Entropy Annealing (The 'Showcase' Stability Fix)
             # Use passed step or fallback to buffer
-            curr_step = step if step is not None else self.step_count.item()
-            anneal_factor = max(0.0, 1.0 - (curr_step / 5000))
+            if step is not None:
+                curr_step = torch.tensor(step, device=idx.device)
+            else:
+                curr_step = self.step_count
+            
+            anneal_factor = F.relu(1.0 - (curr_step.float() / 5000.0))
             p = torch.sigmoid(self.boundary_detector.proj(h_bytes))
             p = p.clamp(1e-6, 1.0 - 1e-6) # Clamp for numerical stability
             entropy = -p * torch.log(p) - (1-p) * torch.log(1-p)
@@ -78,7 +82,8 @@ class CASTGModel(nn.Module):
             
             # Joint Objective
             loss = (5.0 * loss_recon) + l_penalty + loss_sparsity + loss_entropy
-            if step is None: self.step_count.add_(1) # Only auto-increment if not passed
+            if step is None and self.training: 
+                self.step_count.add_(1) # Only auto-increment during training
             
             metrics['avg_seg_len'] = avg_len
             metrics['importance_sparsity'] = 1.0 - importance_gate.mean()
