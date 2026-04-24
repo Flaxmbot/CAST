@@ -73,7 +73,7 @@ def download_data(lang_code):
         # New high-quality Hindi Stories
         ds = load_dataset("OmAlve/TinyStories-Hindi", split="train", streaming=True)
         for i, item in enumerate(ds):
-            text += item["text"] + "\n\n"
+            text += item["translated"] + "\n\n"
             if i > 5000: break
     elif lang_code == "ja":
         # Japanese Wikipedia Subset

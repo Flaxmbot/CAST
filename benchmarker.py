@@ -58,11 +58,7 @@ def run_benchmark(name, model, data, lang_code="en"):
     print(f"\n>>> INFERENCE PERFORMANCE BATTLE: {name}", flush=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
-    # [OPTIMIZATION]: Compile model for inference speedup
-    if hasattr(torch, 'compile'):
-        model = torch.compile(model)
-        
-    # Load Production Weights
+    # Load Production Weights (BEFORE compilation to avoid _orig_mod prefix issues)
     type_str = "cast_g" if "CAST-G" in name else "baseline"
     weight_file = os.path.join(OUTPUT_DIR, f"{type_str}_{lang_code}_production.pt")
     
@@ -71,7 +67,7 @@ def run_benchmark(name, model, data, lang_code="en"):
         state_dict = torch.load(weight_file, map_location=device)
         
         # SMART PATCH: Handle pos_emb size mismatch
-        if 'pos_emb' in state_dict:
+        if 'pos_emb' in state_dict and 'pos_emb' in model.state_dict():
             curr_pos_emb = model.state_dict()['pos_emb']
             if state_dict['pos_emb'].shape != curr_pos_emb.shape:
                 print(f"  [PATCH] Adapting pos_emb from {state_dict['pos_emb'].shape[1]} to {curr_pos_emb.shape[1]} slots...")
@@ -80,9 +76,14 @@ def run_benchmark(name, model, data, lang_code="en"):
                 new_pos_emb[:, :n_src, :] = state_dict['pos_emb'][:, :n_src, :]
                 state_dict['pos_emb'] = new_pos_emb
         
-        model.load_state_dict(state_dict)
+        # Load with strict=False to allow for minor architectural variations (like step_count)
+        model.load_state_dict(state_dict, strict=False)
     else:
         print(f"⚠️ [WARNING] No weights found for {name}. Using random initialization.")
+
+    # [OPTIMIZATION]: Compile model for inference speedup (AFTER loading weights)
+    if hasattr(torch, 'compile'):
+        model = torch.compile(model)
 
     start_time = time.time()
     last_metrics = {}
