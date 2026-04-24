@@ -22,7 +22,7 @@ import argparse
 from cast_g.model import CASTGModel
 from cast_g.config import get_config
 from token_model import TokenModel
-from datasets import load_byte_dataset, get_batch, estimate_bpb
+from data_utils import load_byte_dataset, get_batch, estimate_bpb
 
 OUTPUT_DIR = "/kaggle/working" if os.path.exists("/kaggle/working") else "."
 
