@@ -55,8 +55,9 @@ def setup():
 
 def print_model_specs(name, model):
     """Print model architecture details."""
-    if hasattr(model, 'count_parameters'):
-        counts = model.count_parameters()
+    m = unwrap_model(model)
+    if hasattr(m, 'count_parameters'):
+        counts = m.count_parameters()
         print(f"\n📊 {name}:")
         for comp, n in counts.items():
             print(f"  • {comp}: {n:,}")
@@ -79,6 +80,14 @@ def unwrap_model(model):
     return m
 
 
+def get_metrics(model):
+    """Safely get metrics from a possibly-wrapped model."""
+    m = unwrap_model(model)
+    if hasattr(m, '_last_metrics'):
+        return m._last_metrics
+    return {}
+
+
 def train(dataset_name, config_name, steps, batch_size=None):
     """Train both CAST-G and baseline models."""
     device = 'cuda'
@@ -88,7 +97,10 @@ def train(dataset_name, config_name, steps, batch_size=None):
     
     # Load data
     print(f"\n>>> Loading {dataset_name} dataset...")
-    data = load_byte_dataset(dataset_name, split='train' if dataset_name in ('enwik8', 'text8') else 'train')
+    if dataset_name in ('enwik8', 'text8'):
+        data = load_byte_dataset(dataset_name, split='train')
+    else:
+        data = load_byte_dataset(dataset_name)
     print(f"  Dataset size: {len(data):,} bytes")
     
     # Initialize models
@@ -114,9 +126,10 @@ def train(dataset_name, config_name, steps, batch_size=None):
         effective_batch *= n_gpus
         print(f"  Effective batch size: {effective_batch}")
     
-    # Compile
-    if hasattr(torch, 'compile'):
-        print("⚡ Compiling models...")
+    # NOTE: Skip torch.compile when using DataParallel — they conflict
+    # on Kaggle's PyTorch. torch.compile works best with single GPU or DDP.
+    if torch.cuda.device_count() == 1 and hasattr(torch, 'compile'):
+        print("⚡ Single GPU — compiling models...")
         try:
             cast_model = torch.compile(cast_model, mode='reduce-overhead', dynamic=True)
         except Exception as e:
@@ -157,7 +170,7 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
     
     if os.path.exists(ckpt_path):
         print(f"📦 Resuming from checkpoint: {ckpt_path}")
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
         start_step = checkpoint['step']
         m = unwrap_model(model)
         m.load_state_dict(checkpoint['model_state_dict'])
@@ -181,15 +194,13 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
         
         with torch.amp.autocast('cuda'):
-            output = model(xb, yb, step=step)
-            if isinstance(output, tuple) and len(output) == 3:
-                logits, loss, metrics = output
+            if is_cast:
+                logits, loss = model(xb, yb, step=step)
             else:
-                logits, loss = output
-                metrics = {}
+                logits, loss = model(xb, yb)
         
         optimizer.zero_grad()
-        actual_loss = loss.mean()
+        actual_loss = loss.mean()  # mean() for DataParallel multi-GPU
         scaler.scale(actual_loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -197,16 +208,26 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         scaler.update()
         
         if step % 100 == 0:
-            bpb = estimate_bpb(actual_loss.item())
+            bpb = actual_loss.item() / 0.6931472
             extra = ""
-            if is_cast and 'level0_avg_seg_len' in metrics:
-                seg_len = metrics['level0_avg_seg_len']
-                if torch.is_tensor(seg_len):
-                    seg_len = seg_len.mean().item()
-                extra = f" | Seg: {seg_len:.1f}b"
-                mod_frac = metrics.get('mod_routed_fraction', 0)
-                extra += f" | MoD: {mod_frac:.0%}"
-            print(f"  Step {step:5d} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}{extra}")
+            if is_cast:
+                metrics = get_metrics(model)
+                if 'level0_avg_seg_len' in metrics:
+                    seg_len = metrics['level0_avg_seg_len']
+                    if torch.is_tensor(seg_len):
+                        seg_len = seg_len.mean().item()
+                    extra += f" | Seg: {seg_len:.1f}b"
+                if 'mod_routed_fraction' in metrics:
+                    mod_frac = metrics['mod_routed_fraction']
+                    if torch.is_tensor(mod_frac):
+                        mod_frac = mod_frac.item()
+                    extra += f" | MoD: {mod_frac:.0%}"
+                if 'bpb' in metrics:
+                    recon_bpb = metrics['bpb']
+                    if torch.is_tensor(recon_bpb):
+                        recon_bpb = recon_bpb.item()
+                    bpb = recon_bpb  # Use recon-only BPB
+            print(f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}{extra}")
         
         # Checkpoint every 500 steps
         if (step + 1) % 500 == 0:
@@ -251,26 +272,32 @@ def main():
         print("1. Train on enwik8 (Standard Benchmark)")
         print("2. Train on text8 (Standard Benchmark)")
         print("3. Train English (TinyStories)")
-        print("4. Train Hindi (HindiStories)")
-        print("5. Run Benchmarks")
-        print("6. Full Suite (enwik8 + text8 + Bench)")
-        print("7. Exit")
+        print("4. Train Hindi")
+        print("5. Train Japanese")
+        print("6. Train Chinese")
+        print("7. Run Benchmarks")
+        print("8. Full Suite (enwik8 + EN/HI/JA/ZH + Bench)")
+        print("9. Exit")
         
-        choice = input("\nSelect (1-7): ")
+        choice = input("\nSelect (1-9): ")
         if choice == "1": args.mode, args.dataset = "train", "enwik8"
         elif choice == "2": args.mode, args.dataset = "train", "text8"
         elif choice == "3": args.mode, args.dataset = "train", "en"
         elif choice == "4": args.mode, args.dataset = "train", "hi"
-        elif choice == "5": args.mode = "bench"
-        elif choice == "6": args.mode = "all"
+        elif choice == "5": args.mode, args.dataset = "train", "ja"
+        elif choice == "6": args.mode, args.dataset = "train", "zh"
+        elif choice == "7": args.mode = "bench"
+        elif choice == "8": args.mode = "all"
         else: return
 
     if args.mode == "all":
-        for ds in ["enwik8", "text8"]:
+        # Standard benchmark + multilingual
+        for ds in ["enwik8", "en", "hi", "ja", "zh"]:
             print(f"\n{'='*60}\n🚀 PROCESSING: {ds.upper()}\n{'='*60}")
             train(ds, args.config, args.steps, args.batch_size)
-            print(f"\n📈 Benchmarking {ds}...")
-            os.system(f"python benchmarker.py --dataset {ds} --config {args.config}")
+        
+        print(f"\n📈 Running benchmarks...")
+        os.system(f"python benchmarker.py --dataset enwik8 --config {args.config}")
         print("\n🏆 FULL SUITE COMPLETE.")
         
     elif args.mode == "train":

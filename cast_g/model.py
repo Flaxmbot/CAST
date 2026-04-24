@@ -175,18 +175,22 @@ class CASTGModel(nn.Module):
             loss = loss_recon + loss_seg + loss_mod
             
             # Compute bits-per-byte for honest benchmarking
-            bpb = loss_recon.item() / 0.6931472  # ln(2) ≈ 0.693
+            bpb = loss_recon.detach() / 0.6931472  # ln(2) ≈ 0.693
             
-            metrics['loss_recon'] = loss_recon
-            metrics['loss_seg'] = loss_seg
-            metrics['loss_mod'] = loss_mod
+            metrics['loss_recon'] = loss_recon.detach()
+            metrics['loss_seg'] = loss_seg.detach()
+            metrics['loss_mod'] = loss_mod.detach()
             metrics['bpb'] = bpb
             
             # Update step counter
             if step is None and self.training:
                 self.step_count.add_(1)
         
-        return logits, loss, metrics
+        # Store metrics on self for access after DataParallel forward
+        # (DP can only gather tensors, not dicts with mixed types)
+        self._last_metrics = metrics
+        
+        return logits, loss
     
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int = 50, temp: float = 0.7) -> torch.Tensor:

@@ -216,7 +216,7 @@ class MoDTransformerStack(nn.Module):
         """
         B, S, D = x.shape
         total_aux_loss = torch.tensor(0.0, device=x.device)
-        total_routed_fraction = 0.0
+        total_routed_fraction = torch.tensor(0.0, device=x.device)
         
         for layer_idx in range(self.n_layer):
             router = self.routers[layer_idx]
@@ -237,13 +237,13 @@ class MoDTransformerStack(nn.Module):
             
             # Accumulate auxiliary loss
             total_aux_loss = total_aux_loss + router.compute_aux_loss(scores)
-            total_routed_fraction += (scores > 0).float().mean().item()
+            total_routed_fraction = total_routed_fraction + (scores > 0).float().mean()
         
         x = self.final_norm(x)
         
         metrics = {
             'mod_aux_loss': total_aux_loss,
-            'mod_routed_fraction': total_routed_fraction / self.n_layer,
+            'mod_routed_fraction': total_routed_fraction / max(1, self.n_layer),
         }
         
         return x, metrics
