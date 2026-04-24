@@ -19,13 +19,9 @@ CONFIG = {
 }
 
 def load_data(lang="en"):
-    if lang == "hi":
-        print(">>> LOADING PRODUCTION HINDI DATASET...")
-        path = "data_hi.txt"
-    else:
-        print(">>> LOADING PRODUCTION ENGLISH DATASET...")
-        path = "data_en.txt"
-        
+    path = f"data/data_{lang}.txt"
+    print(f">>> LOADING {lang.upper()} DATASET from {path}...")
+    
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
@@ -125,7 +121,7 @@ def print_matrix(results):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lang", type=str, default="en", choices=["en", "hi"], help="Dataset language (en or hi)")
+    parser.add_argument("--lang", type=str, default="en", choices=["en", "hi", "ja", "zh"], help="Dataset language")
     args = parser.parse_args()
     
     data = load_data(lang=args.lang)
@@ -135,6 +131,7 @@ if __name__ == "__main__":
     token = TokenModel(vocab_size=256, d_model=CONFIG['d_model'], n_layer=CONFIG['n_layer'], n_head=CONFIG['n_head'], block_size=CONFIG['block_size'])
     
     c_res = run_benchmark("CAST-G (Modular Hardware-Aware)", cast_g, data, lang_code=args.lang)
-    b_res = run_benchmark("Baseline (Discrete)", token, data)
+    b_res = run_benchmark("Baseline (Discrete)", token, data, lang_code=args.lang)
     
     print_matrix({'castg': c_res, 'baseline': b_res})
+
