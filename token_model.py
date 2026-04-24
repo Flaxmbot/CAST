@@ -34,7 +34,7 @@ class TokenModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None):
+    def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None, **kwargs):
         B, T = idx.shape
         # Standard Lookup
         x = self.token_embedding(idx) 

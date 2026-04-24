@@ -105,19 +105,20 @@ def train(lang_code, data_path, steps, batch_size=64):
     print_model_specs("CAST-G (Killer)", cast_model)
     print_model_specs("Token-Baseline", base_model)
     
-    # [OPTIMIZATION]: Wrap in torch.compile for massive speedup (PyTorch 2.0+)
-    if hasattr(torch, 'compile'):
-        print("⚡ Compiling models for maximum performance...")
-        cast_model = torch.compile(cast_model)
-        base_model = torch.compile(base_model)
-    
-    # Multi-GPU support
+    # Multi-GPU support (Apply first, then compile)
     if torch.cuda.device_count() > 1:
         print(f"⚡ Multi-GPU detected! Wrapping models in DataParallel.")
         cast_model = torch.nn.DataParallel(cast_model)
         base_model = torch.nn.DataParallel(base_model)
         batch_size = batch_size * torch.cuda.device_count()
         print(f"📈 Scaled effective batch size to {batch_size}")
+
+    # [OPTIMIZATION]: Wrap in torch.compile for massive speedup (PyTorch 2.0+)
+    # We compile the wrapped model to ensure all replicas are optimized correctly
+    if hasattr(torch, 'compile'):
+        print("⚡ Compiling models for maximum performance...")
+        cast_model = torch.compile(cast_model)
+        base_model = torch.compile(base_model)
     
     with open(data_path, "r", encoding="utf-8") as f:
         text = f.read()
@@ -133,6 +134,20 @@ def train(lang_code, data_path, steps, batch_size=64):
     base_save = os.path.join(OUTPUT_DIR, f"baseline_{lang_code}_production.pt")
     run_loop(base_model, data, steps, device, base_save, batch_size, show_seg=False)
 
+def unwrap_model(model):
+    """Deeply unwraps a model from DataParallel and torch.compile wrappers."""
+    m = model
+    # Unwrap DataParallel
+    if hasattr(m, 'module'):
+        m = m.module
+    # Unwrap torch.compile (OptimizedModule)
+    if hasattr(m, '_orig_mod'):
+        m = m._orig_mod
+    # Handle the case where they are nested the other way
+    if hasattr(m, 'module'):
+        m = m.module
+    return m
+
 def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler('cuda')
@@ -144,8 +159,7 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
         print(f"📦 Resuming from checkpoint: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=device)
         start_step = checkpoint['step']
-        # Handle DataParallel/Compiled model state dict loading
-        m = model.module if hasattr(model, 'module') else model
+        m = unwrap_model(model)
         m.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if start_step >= steps:
@@ -158,7 +172,7 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
         xb, yb = xb.to(device), yb.to(device)
         
         with torch.amp.autocast('cuda'):
-            output = model(xb, yb)
+            output = model(xb, yb, step=step)
             if isinstance(output, tuple) and len(output) == 3:
                 logits, loss, metrics = output
             else:
@@ -181,7 +195,7 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
 
         # [PROGRESS SAVING]: Save checkpoint every 500 steps
         if (step + 1) % 500 == 0:
-            m = model.module if hasattr(model, 'module') else model
+            m = unwrap_model(model)
             ckpt = {
                 'step': step + 1,
                 'model_state_dict': m.state_dict(),
@@ -191,7 +205,7 @@ def run_loop(model, data, steps, device, save_path, batch_size, show_seg=False):
             print(f"💾 Checkpoint saved at step {step+1}")
 
     # Final Weights (Production Format)
-    m = model.module if hasattr(model, 'module') else model
+    m = unwrap_model(model)
     torch.save(m.state_dict(), save_path)
     print(f"✅ Production weights saved to {save_path}")
     if os.path.exists(ckpt_path): os.remove(ckpt_path) # Cleanup
