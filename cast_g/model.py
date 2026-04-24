@@ -32,8 +32,14 @@ from .encoder import ByteEncoder
 from .boundary import MIBoundaryDetector, MISegmentationLoss
 from .hierarchy import HierarchicalSegmenter
 from .global_stack import MoDTransformerStack, pool_segments
-from .decoder import UpsampleDecoder
+from .decoder import CausalLocalDecoder
 from .config import get_config
+
+__all__ = [
+    'CASTGModel',
+    'get_config',
+    'CausalLocalDecoder',
+]
 
 
 class CASTGModel(nn.Module):
@@ -85,12 +91,9 @@ class CASTGModel(nn.Module):
             dropout=dropout,
         )
         
-        # 4. Decoder: unpool segments → upsample → byte logits
-        # Uses segment_ids for EXACT position alignment (no fixed expansion)
-        self.decoder = UpsampleDecoder(
-            d_model=d_model,
-            dropout=dropout,
-        )
+        # 4. Causal Local Decoder (Autoregressive byte prediction)
+        self.decoder = CausalLocalDecoder(d_model, dropout=dropout)
+
         
         # 5. Global Start Token (for causality shift)
         self.start_seg = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
@@ -114,66 +117,53 @@ class CASTGModel(nn.Module):
         self,
         idx: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
+        temp: float = 1.0,
         step: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Full forward pass: bytes → logits.
-        
-        Args:
-            idx: [B, T] — raw byte indices (0-255)
-            targets: [B, T] — target byte indices (for loss computation)
-            step: training step (for temperature annealing)
-            
-        Returns:
-            logits: [B, T, 256] — byte prediction logits
-            loss: scalar total loss (None if no targets)
-            metrics: dict of training metrics
+        Full forward pass: bytes -> logits.
         """
+        metrics = {}
+
         B, T = idx.shape
+        T_encoded = T // 4
         
-        # 1. Encode bytes
+        # 1. Byte Encoding (O(T) convolution/SSM)
         h_bytes = self.encoder(idx)  # [B, T//4, D]
-        T_encoded = h_bytes.size(1)  # T//4 after conv stem
         
-        # 2. Hierarchical segmentation
-        temp = self.get_boundary_temp(step)
+        # 2. Hierarchical Segmentation (MI-driven)
+        # Produces segments, boundaries, and auxiliary losses
         level_segments, level_boundaries, level_segment_ids, seg_metrics = \
             self.hierarchy(h_bytes, temp=temp, hard=True)
-        
-        # 3. Global reasoning on Level 0 (finest) segments
+            
+        # We use the finest level (level 0) for the global stack to maintain detail
         fine_segments = level_segments[0]
         fine_segment_ids = level_segment_ids[0]  # [B, T_encoded]
+        
+        # 3. Global Transformer Stack (O(S²) attention)
+        # Processes contextualized segment representations
         h_global, mod_metrics = self.global_stack(fine_segments)
         
-        # 4. Strict Causality Shift (CRITICAL FIX)
+        # 4. Strict Causality Shift
         # To predict bytes in segment k, we must only use h_global[k-1].
-        # Otherwise, predicting byte t in segment k leaks future bytes in k.
-        # We prepend a learned <start> token and shift everything right.
         B_g, S_g, D_g = h_global.shape
         h_shifted = torch.cat([self.start_seg.expand(B_g, -1, -1), h_global[:, :-1, :]], dim=1)
         
-        # 5. Decode: unpool segments → upsample → byte logits
-        # Uses segment_ids for EXACT position alignment
-        logits = self.decoder(h_shifted, fine_segment_ids, T_encoded, T)
+        # 5. Causal Local Decoding (Autoregressive)
+        # Combines segment context with shifted input bytes
+        logits = self.decoder(h_shifted, fine_segment_ids, T_encoded, T, idx)
         
-        # 6. Loss computation
+        # 6. Loss Calculation
         loss = None
-        metrics = {**seg_metrics, **mod_metrics}
-        
         if targets is not None:
-            # A. Reconstruction loss (primary objective)
-            loss_recon = F.cross_entropy(
-                logits.reshape(-1, 256),
-                targets.reshape(-1)
-            )
+            # Reconstruction Loss (Primary)
+            loss_recon = F.cross_entropy(logits.view(-1, 256), targets.view(-1))
             
-            # B. Segmentation loss (MI + Lagrangian, from hierarchy)
+            # Auxiliary Losses (Segmentation & MoD)
             loss_seg = seg_metrics.get('total_seg_loss', torch.tensor(0.0, device=idx.device))
-            
-            # C. MoD auxiliary loss (load balancing)
             loss_mod = mod_metrics.get('mod_aux_loss', torch.tensor(0.0, device=idx.device))
             
-            # Joint objective
+            # Total Loss
             loss = loss_recon + loss_seg + loss_mod
             
             # Compute bits-per-byte for honest benchmarking

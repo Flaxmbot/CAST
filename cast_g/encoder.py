@@ -28,14 +28,14 @@ class MultiScaleConvStem(nn.Module):
     """
     def __init__(self, d_model: int, dropout: float = 0.1):
         super().__init__()
-        # Multi-scale parallel convolutions (causal: padding = k-1)
-        self.conv_2 = nn.Conv1d(d_model, d_model // 4, kernel_size=2, padding=1)
-        self.conv_4 = nn.Conv1d(d_model, d_model // 4, kernel_size=4, padding=3)
-        self.conv_8 = nn.Conv1d(d_model, d_model // 4, kernel_size=8, padding=7)
+        # Multi-scale parallel convolutions (strict causal: no internal padding)
+        self.conv_2 = nn.Conv1d(d_model, d_model // 4, kernel_size=2)
+        self.conv_4 = nn.Conv1d(d_model, d_model // 4, kernel_size=4)
+        self.conv_8 = nn.Conv1d(d_model, d_model // 4, kernel_size=8)
         self.conv_1 = nn.Conv1d(d_model, d_model // 4, kernel_size=1)  # Identity scale
         
-        # Fusion and downsampling (causal: padding = k-1)
-        self.downsample = nn.Conv1d(d_model, d_model, kernel_size=4, stride=4, padding=3)
+        # Fusion and downsampling (strict causal)
+        self.downsample = nn.Conv1d(d_model, d_model, kernel_size=4, stride=4)
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.act = nn.GELU()
@@ -51,24 +51,20 @@ class MultiScaleConvStem(nn.Module):
         # [B, T, D] -> [B, D, T] for Conv1d
         x_t = x.transpose(1, 2)
         
-        # Multi-scale feature extraction (causal: trim future outputs)
-        h1 = self.conv_1(x_t)                                 # [B, D//4, T]
-        h2 = self.conv_2(x_t)[:, :, :-1]                      # [B, D//4, T]
-        h4 = self.conv_4(x_t)[:, :, :-3]                      # [B, D//4, T]
-        h8 = self.conv_8(x_t)[:, :, :-7]                      # [B, D//4, T]
+        # Multi-scale feature extraction with strict left-padding
+        h1 = self.conv_1(x_t)                                                # [B, D//4, T]
+        h2 = self.conv_2(F.pad(x_t, (1, 0)))                                # [B, D//4, T]
+        h4 = self.conv_4(F.pad(x_t, (3, 0)))                                # [B, D//4, T]
+        h8 = self.conv_8(F.pad(x_t, (7, 0)))                                # [B, D//4, T]
         
         # Concatenate multi-scale features
         h_multi = torch.cat([h1, h2, h4, h8], dim=1)  # [B, D, T]
         h_multi = self.act(h_multi)
         
-        # Downsample by 4x (causal: trim future outputs)
-        h_down = self.downsample(h_multi)  # [B, D, T_new]
-        # Transpose convolution with stride 4 and padding 3 produces:
-        # output_len = floor((T + 2*3 - 4) / 4) + 1 = floor((T+2)/4) + 1
-        # We need exactly T/4. If T=1024, (1024+2)/4 + 1 = 257.
-        # Trim to exactly T//4
-        target_T = T // 4
-        h_down = h_down[:, :, :target_T]
+        # Downsample by 4x with strict left-padding
+        # To make stride-4 causal, we pad by 3 on the left.
+        # Output j will see input positions [4j-3, 4j-2, 4j-1, 4j].
+        h_down = self.downsample(F.pad(h_multi, (3, 0)))  # [B, D, T//4]
         
         h_down = h_down.transpose(1, 2)    # [B, T//4, D]
         

@@ -224,18 +224,37 @@ class MoDTransformerStack(nn.Module):
         x = x + self.pos_emb[:, :S, :]
         
         total_aux_loss = torch.tensor(0.0, device=x.device)
-        total_routed_fraction = torch.tensor(0.0, device=x.device)
+        
+        # Track routing decisions for metrics
+        all_routed_fraction = []
         
         for layer_idx in range(self.n_layer):
+            router = self.routers[layer_idx]
             transformer = self.layers[layer_idx]
-            # Process ALL segments sequentially (causal attention within layer)
-            x = transformer(x)
+            
+            # 1. Route: Select top-k segments
+            selected, topk_indices, scores = router(x)
+            
+            # 2. Process: Selected segments through Transformer block
+            # (Self-attention within the selected subset is still causal relative to original order)
+            h_selected = transformer(selected)
+            
+            # 3. Update: Scatter processed segments back to original positions (residual)
+            # We use a residual connection: x = x + scatter(h_selected - selected)
+            # This ensures skipped segments retain their previous state.
+            x_new = x.clone()
+            x_new.scatter_(1, topk_indices.unsqueeze(-1).expand(-1, -1, D), h_selected)
+            x = x_new
+            
+            # 4. Aux Loss
+            total_aux_loss = total_aux_loss + router.compute_aux_loss(scores)
+            all_routed_fraction.append((scores > 0).float().mean())
             
         x = self.final_norm(x)
         
         metrics = {
-            'mod_aux_loss': torch.tensor(0.0, device=x.device),
-            'mod_routed_fraction': torch.tensor(1.0, device=x.device),
+            'mod_aux_loss': total_aux_loss,
+            'mod_routed_fraction': torch.stack(all_routed_fraction).mean(),
         }
         
         return x, metrics
