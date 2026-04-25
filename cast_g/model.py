@@ -100,8 +100,21 @@ class CASTGModel(nn.Module):
         
         # Training state
         self.register_buffer('step_count', torch.tensor(0, dtype=torch.long))
-        
-    def get_boundary_temp(self, step: Optional[int] = None) -> float:
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+        elif isinstance(module, (nn.Conv1d, nn.ConvTranspose1d)):
+            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+
         """Compute annealed boundary temperature."""
         if step is None:
             step = self.step_count.item()
@@ -119,10 +132,11 @@ class CASTGModel(nn.Module):
         targets: Optional[torch.Tensor] = None,
         temp: float = 1.0,
         step: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Full forward pass: bytes -> logits.
+        Full forward pass: bytes -> logits, loss, metrics_tensor.
         """
+
         metrics = {}
 
         B, T = idx.shape
@@ -165,24 +179,28 @@ class CASTGModel(nn.Module):
             
             # Total Loss
             loss = loss_recon + loss_seg + loss_mod
+
             
-            # Compute bits-per-byte for honest benchmarking
-            bpb = loss_recon.detach() / 0.6931472  # ln(2) ≈ 0.693
+            # Record metrics for gathering
+            avg_seg_len = seg_metrics.get('avg_seg_len', torch.tensor(0.0, device=idx.device))
             
-            metrics['loss_recon'] = loss_recon.detach()
-            metrics['loss_seg'] = loss_seg.detach()
-            metrics['loss_mod'] = loss_mod.detach()
-            metrics['bpb'] = bpb
+            # metrics_tensor: [recon_loss, seg_loss, mod_loss, avg_seg_len]
+            metrics_tensor = torch.stack([
+                loss_recon.detach(),
+                loss_seg.detach(),
+                loss_mod.detach(),
+                avg_seg_len.detach()
+            ])
+
             
             # Update step counter
             if step is None and self.training:
                 self.step_count.add_(1)
+        else:
+            metrics_tensor = torch.zeros(4, device=idx.device)
         
-        # Store metrics on self for access after DataParallel forward
-        # (DP can only gather tensors, not dicts with mixed types)
-        self._last_metrics = metrics
-        
-        return logits, loss
+        return logits, loss, metrics_tensor
+
     
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int = 50, temp: float = 0.7) -> torch.Tensor:

@@ -210,38 +210,39 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         
         with torch.amp.autocast('cuda'):
             if is_cast:
-                logits, loss = model(xb, yb, step=step)
+                logits, loss, metrics_vec = model(xb, yb, step=step)
             else:
                 logits, loss = model(xb, yb)
+                metrics_vec = None
         
         optimizer.zero_grad()
         actual_loss = loss.mean()  # mean() for DataParallel multi-GPU
         scaler.scale(actual_loss).backward()
+        
+        # Aggregate metrics across GPUs for logging
+        if metrics_vec is not None:
+            # metrics_vec: [num_gpus, 4] -> [4]
+            avg_metrics = metrics_vec.mean(dim=0).detach()
+        else:
+            avg_metrics = None
+        
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
         
         if step % 100 == 0:
-            metrics = get_metrics(model)
-            # Use reconstruction loss for BPB if available, else fallback to total loss
-            recon_loss = metrics.get('loss_recon', actual_loss.detach())
-            bpb = recon_loss.item() / 0.6931472
-            
-            log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
-            
-            if is_cast:
-                seg_len = metrics.get('level0_avg_seg_len', 0.0)
-                mi_loss = metrics.get('loss_seg', 0.0)
-                mod_loss = metrics.get('loss_mod', 0.0)
-                # Handle potential tensors from DataParallel
-                if torch.is_tensor(seg_len): seg_len = seg_len.mean().item()
-                if torch.is_tensor(mi_loss): mi_loss = mi_loss.mean().item()
-                if torch.is_tensor(mod_loss): mod_loss = mod_loss.mean().item()
-                
-                log_str += f" [R:{recon_loss.item():.2f} S:{mi_loss:.2f} M:{mod_loss:.2f} L:{seg_len:.1f}b]"
+            if is_cast and avg_metrics is not None:
+                recon_l, seg_l, mod_l, s_len = avg_metrics.tolist()
+                bpb = recon_l / 0.6931472
+                log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
+                log_str += f" [R:{recon_l:.2f} S:{seg_l:.2f} M:{mod_l:.2f} L:{s_len:.1f}b]"
+            else:
+                bpb = actual_loss.item() / 0.6931472
+                log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
             
             print(log_str)
+
 
         
         # Checkpoint every 500 steps
