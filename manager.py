@@ -223,26 +223,26 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         scaler.update()
         
         if step % 100 == 0:
-            bpb = actual_loss.item() / 0.6931472
-            extra = ""
+            metrics = get_metrics(model)
+            # Use reconstruction loss for BPB if available, else fallback to total loss
+            recon_loss = metrics.get('loss_recon', actual_loss.detach())
+            bpb = recon_loss.item() / 0.6931472
+            
+            log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
+            
             if is_cast:
-                metrics = get_metrics(model)
-                if 'level0_avg_seg_len' in metrics:
-                    seg_len = metrics['level0_avg_seg_len']
-                    if torch.is_tensor(seg_len):
-                        seg_len = seg_len.mean().item()
-                    extra += f" | Seg: {seg_len:.1f}b"
-                if 'mod_routed_fraction' in metrics:
-                    mod_frac = metrics['mod_routed_fraction']
-                    if torch.is_tensor(mod_frac):
-                        mod_frac = mod_frac.item()
-                    extra += f" | MoD: {mod_frac:.0%}"
-                if 'bpb' in metrics:
-                    recon_bpb = metrics['bpb']
-                    if torch.is_tensor(recon_bpb):
-                        recon_bpb = recon_bpb.item()
-                    bpb = recon_bpb  # Use recon-only BPB
-            print(f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}{extra}")
+                seg_len = metrics.get('level0_avg_seg_len', 0.0)
+                mi_loss = metrics.get('loss_seg', 0.0)
+                mod_loss = metrics.get('loss_mod', 0.0)
+                # Handle potential tensors from DataParallel
+                if torch.is_tensor(seg_len): seg_len = seg_len.mean().item()
+                if torch.is_tensor(mi_loss): mi_loss = mi_loss.mean().item()
+                if torch.is_tensor(mod_loss): mod_loss = mod_loss.mean().item()
+                
+                log_str += f" [R:{recon_loss.item():.2f} S:{mi_loss:.2f} M:{mod_loss:.2f} L:{seg_len:.1f}b]"
+            
+            print(log_str)
+
         
         # Checkpoint every 500 steps
         if (step + 1) % 500 == 0:

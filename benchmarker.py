@@ -59,15 +59,19 @@ def evaluate_bpb(model, data, config, device, n_eval_steps=100, label=""):
         for i in range(n_eval_steps):
             xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
             
-            output = model(xb, yb)
-            if isinstance(output, tuple) and len(output) == 3:
-                _, loss, _ = output
-            else:
-                _, loss = output
+            # Full forward pass
+            logits, loss = model(xb, yb)
             
-            if loss is not None:
-                total_loss += loss.item()
-                n_steps += 1
+            # Extract reconstruction loss from metrics for honest BPB
+            m = model.module if hasattr(model, 'module') else model
+            if hasattr(m, '_last_metrics') and 'loss_recon' in m._last_metrics:
+                loss_val = m._last_metrics['loss_recon'].item()
+            else:
+                loss_val = loss.item() if loss is not None else 0.0
+                
+            total_loss += loss_val
+            n_steps += 1
+
             
             if i % 20 == 0:
                 current_bpb = estimate_bpb(total_loss / max(1, n_steps))

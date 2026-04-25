@@ -222,11 +222,16 @@ class AdaptiveLagrangian(nn.Module):
         avg_segments = boundaries.sum(dim=1).mean()  # scalar
         avg_len = total_bytes / (avg_segments + 1e-6)
         
-        # Normalized constraint violation (divided by target for scale-invariance)
+        # Normalized constraint violation
         violation = (avg_len - self.target_len) / self.target_len
         
-        # Penalty on normalized violation — capped so seg loss never exceeds recon
-        penalty = self.lam * violation.pow(2).clamp(max=1.0)
+        # Penalty on normalized violation.
+        # Use absolute violation (linear) instead of squared to ensure stable gradients
+        # even when far from the target. This avoids the "gradient explosion" or
+        # "dead zone" issues of squared/clamped penalties.
+        penalty = self.lam * violation.abs()
+
+
         
         # Proper dual ascent: λ UP when segments too short (need fewer boundaries),
         # λ DOWN when constraint is roughly satisfied (|violation| < 0.1)
