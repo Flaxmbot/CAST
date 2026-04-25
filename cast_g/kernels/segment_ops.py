@@ -38,7 +38,10 @@ def segment_pool(
     n_segments = segment_ids.max(dim=1).values + 1  # [B]
     
     if max_segments is None:
-        max_segments = int(n_segments.max().detach().cpu().item())
+        # Use a FIXED cap based on sequence length to ensure consistent shapes
+        # across GPUs in DataParallel. Each GPU gets same output shape.
+        # Cap at T//2 (worst case: boundary every other position)
+        max_segments = min(int(n_segments.max().detach().cpu().item()), T // 2)
     max_segments = max(1, int(max_segments))
     
     # Clamp segment_ids to valid range

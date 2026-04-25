@@ -41,8 +41,15 @@ def setup():
         mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)
         print(f"  ✅ GPU {i}: {name} ({mem:.1f} GB)")
     
-    torch.set_float32_matmul_precision('high')
-    torch.backends.cudnn.benchmark = True
+    # GPU performance optimizations
+    torch.set_float32_matmul_precision('high')     # TF32 on Ampere+
+    torch.backends.cudnn.benchmark = True           # Autotune convolutions
+    torch.backends.cuda.matmul.allow_tf32 = True    # TF32 matmuls
+    torch.backends.cudnn.allow_tf32 = True          # TF32 in cuDNN
+    
+    # Prefer flash/memory-efficient attention for SDPA
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
     
     import warnings
     warnings.filterwarnings("ignore", message="Was asked to gather along dimension 0")
@@ -165,15 +172,32 @@ def train(dataset_name, config_name, steps, batch_size=None):
     _train_loop(base_model, data, steps, device, base_save, effective_batch, config, is_cast=False)
 
 
+def _get_lr(step, warmup_steps, total_steps, max_lr, min_lr_ratio=0.1):
+    """Warmup + cosine decay learning rate schedule."""
+    if step < warmup_steps:
+        # Linear warmup
+        return max_lr * (step + 1) / warmup_steps
+    else:
+        # Cosine decay from max_lr to max_lr * min_lr_ratio
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(1.0, progress)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return max_lr * (min_lr_ratio + (1 - min_lr_ratio) * cosine)
+
+
 def _train_loop(model, data, steps, device, save_path, batch_size, config, is_cast=True):
-    """Core training loop with checkpointing and BPB reporting."""
+    """Core training loop with cosine LR decay, checkpointing, and BPB reporting."""
+    max_lr = config.get('learning_rate', 3e-4)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config.get('learning_rate', 3e-4),
+        lr=max_lr,
         weight_decay=config.get('weight_decay', 0.1),
+        betas=(0.9, 0.95),   # Slightly less aggressive β2 for stability
+        fused=True,           # GPU-accelerated optimizer (PyTorch 2.0+)
     )
     scaler = torch.amp.GradScaler('cuda')
     block_size = config['block_size']
+    warmup_steps = config.get('warmup_steps', 500)
     
     # Resume logic
     start_step = 0
@@ -195,23 +219,23 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
             if os.path.exists(ckpt_path): os.remove(ckpt_path)
             return
     
-    # Warmup scheduler
-    warmup_steps = config.get('warmup_steps', 500)
+    print(f"  LR schedule: warmup {warmup_steps} steps → cosine decay to {max_lr*0.1:.1e}")
     
     model.train()
+    best_bpb = float('inf')
+    
     for step in range(start_step, steps):
-        # Learning rate warmup
-        if step < warmup_steps:
-            lr_scale = (step + 1) / warmup_steps
-            for pg in optimizer.param_groups:
-                pg['lr'] = config.get('learning_rate', 3e-4) * lr_scale
+        # Cosine LR schedule with warmup
+        lr = _get_lr(step, warmup_steps, steps, max_lr)
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
         
         xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
         
         with torch.amp.autocast('cuda'):
             logits, loss, metrics_vec = model(xb, yb, step=step)
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
         actual_loss = loss.mean()  # mean() for DataParallel multi-GPU
         scaler.scale(actual_loss).backward()
         
@@ -227,15 +251,19 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         if step % 100 == 0:
             recon_l, seg_l, mod_l, s_len = avg_metrics.tolist()
             bpb = recon_l / 0.6931472
+            best_bpb = min(best_bpb, bpb)
             if is_cast:
                 log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
                 log_str += f" [R:{recon_l:.2f} S:{seg_l:.2f} M:{mod_l:.2f} L:{s_len:.1f}b]"
+                log_str += f" lr={lr:.1e}"
             else:
-                log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
+                log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f} lr={lr:.1e}"
             
             print(log_str)
 
-
+        # Periodic GPU cache clear (helps DataParallel utilization)
+        if step % 200 == 0 and step > 0:
+            torch.cuda.empty_cache()
         
         # Checkpoint every 500 steps
         if (step + 1) % 500 == 0:
@@ -246,12 +274,14 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
                 'optimizer_state_dict': optimizer.state_dict(),
             }
             torch.save(ckpt, ckpt_path)
-            print(f"💾 Checkpoint at step {step+1}")
+            recon_l = avg_metrics[0].item()
+            bpb = recon_l / 0.6931472
+            print(f"💾 Checkpoint at step {step+1} | Best BPB: {best_bpb:.4f}")
     
     # Save final weights
     m = unwrap_model(model)
     torch.save(m.state_dict(), save_path)
-    print(f"✅ Saved to {save_path}")
+    print(f"✅ Saved to {save_path} | Final best BPB: {best_bpb:.4f}")
     if os.path.exists(ckpt_path): os.remove(ckpt_path)
 
 

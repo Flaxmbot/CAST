@@ -207,8 +207,9 @@ def get_batch(
     y = data[indices + 1]
     
     if device is not None:
-        x = x.to(device)
-        y = y.to(device)
+        # non_blocking=True enables async CPU→GPU transfer
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
     
     return x, y
 
