@@ -186,20 +186,22 @@ class CASTGModel(nn.Module):
             # Record metrics for gathering
             avg_seg_len = seg_metrics.get('avg_seg_len', torch.tensor(0.0, device=idx.device))
             
-            # metrics_tensor: [recon_loss, seg_loss, mod_loss, avg_seg_len]
+            # metrics_tensor: [1, 4] (extra dim for DataParallel gathering)
             metrics_tensor = torch.stack([
                 loss_recon.detach(),
                 loss_seg.detach(),
                 loss_mod.detach(),
                 avg_seg_len.detach()
-            ])
+            ]).unsqueeze(0)
+
 
             
             # Update step counter
             if step is None and self.training:
                 self.step_count.add_(1)
         else:
-            metrics_tensor = torch.zeros(4, device=idx.device)
+            metrics_tensor = torch.zeros(1, 4, device=idx.device)
+
         
         return logits, loss, metrics_tensor
 
