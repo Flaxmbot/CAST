@@ -60,7 +60,8 @@ def evaluate_bpb(model, data, config, device, n_eval_steps=100, label=""):
             xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
             
             # Full forward pass
-            logits, loss = model(xb, yb)
+            logits, loss, metrics = model(xb, yb)
+
             
             # Extract reconstruction loss from metrics for honest BPB
             m = model.module if hasattr(model, 'module') else model

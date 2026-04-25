@@ -115,6 +115,7 @@ class CASTGModel(nn.Module):
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
 
+    def get_boundary_temp(self, step: Optional[int] = None) -> float:
         """Compute annealed boundary temperature."""
         if step is None:
             step = self.step_count.item()
@@ -125,6 +126,7 @@ class CASTGModel(nn.Module):
         
         progress = min(1.0, step / max(1, temp_steps))
         return temp_start + (temp_end - temp_start) * progress
+
     
     def forward(
         self,
@@ -226,8 +228,9 @@ class CASTGModel(nn.Module):
             block_size = self.config.get('block_size', 1024)
             context = idx[:, -block_size:] if idx.size(1) > block_size else idx
             
-            # Full forward pass (no targets → no loss)
-            logits, _ = self.forward(context, targets=None)
+            # Full forward pass (no targets -> no loss)
+            logits, _, _ = self.forward(context, targets=None)
+
             
             # Sample from last position
             last_logits = logits[:, -1, :] / temp  # [B, 256]

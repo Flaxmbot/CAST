@@ -31,7 +31,8 @@ def test_cast_g():
     
     print(f"  Running forward pass (B={B}, T={T})...")
     try:
-        logits, loss = model(idx, targets=targets)
+        logits, loss, metrics = model(idx, targets=targets)
+
         print(f"  Forward pass successful. Loss: {loss.item():.4f}")
         print(f"  Logits shape: {logits.shape}")
         assert logits.shape == (B, T, 256), f"Wrong logits shape: {logits.shape}"
@@ -58,8 +59,9 @@ def test_cast_g():
     
     model.eval() # Use eval for causality check to avoid dropout noise
     with torch.no_grad():
-        logits_v1, _ = model(idx)
-        logits_v2, _ = model(idx_v2)
+        logits_v1, _, _ = model(idx)
+        logits_v2, _, _ = model(idx_v2)
+
         
     # Check if prefix logits are identical
     diff = (logits_v1[:, :-1, :] - logits_v2[:, :-1, :]).abs().max().item()
