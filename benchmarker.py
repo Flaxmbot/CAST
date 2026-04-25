@@ -29,8 +29,9 @@ OUTPUT_DIR = "/kaggle/working" if os.path.exists("/kaggle/working") else "."
 
 def print_model_specs(name: str, model: torch.nn.Module):
     """Print honest model specifications."""
-    if hasattr(model, 'count_parameters'):
-        counts = model.count_parameters()
+    m = _unwrap(model)
+    if hasattr(m, 'count_parameters'):
+        counts = m.count_parameters()
         print(f"\n📊 {name} SPECS:")
         for component, n in counts.items():
             if component != 'total':
@@ -43,11 +44,33 @@ def print_model_specs(name: str, model: torch.nn.Module):
     print("-" * 40)
 
 
+def _unwrap(model):
+    """Unwrap DataParallel and torch.compile wrappers."""
+    m = model
+    if hasattr(m, '_orig_mod'):
+        m = m._orig_mod
+    if hasattr(m, 'module'):
+        m = m.module
+    if hasattr(m, '_orig_mod'):
+        m = m._orig_mod
+    return m
+
+
+def _get_recon_loss(model, loss):
+    """Extract reconstruction-only loss from model, falling back to total loss."""
+    m = _unwrap(model)
+    if hasattr(m, '_last_recon_loss'):
+        return m._last_recon_loss.item()
+    # Fallback: use the total loss (acceptable for baseline which has no aux losses)
+    return loss.mean().item() if loss is not None else 0.0
+
+
 def evaluate_bpb(model, data, config, device, n_eval_steps=100, label=""):
     """
     Evaluate bits-per-byte on a dataset.
     
     This is the standard metric — directly comparable to published results.
+    Uses reconstruction-only loss (not auxiliary losses) for honest BPB.
     """
     model.eval()
     total_loss = 0.0
@@ -59,17 +82,11 @@ def evaluate_bpb(model, data, config, device, n_eval_steps=100, label=""):
         for i in range(n_eval_steps):
             xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
             
-            # Full forward pass
+            # Forward pass — both models now return 3-tuple
             logits, loss, metrics = model(xb, yb)
-
             
-            # Extract reconstruction loss from metrics for honest BPB
-            m = model.module if hasattr(model, 'module') else model
-            if hasattr(m, '_last_metrics') and 'loss_recon' in m._last_metrics:
-                loss_val = m._last_metrics['loss_recon'].item()
-            else:
-                loss_val = loss.item() if loss is not None else 0.0
-                
+            # Use reconstruction-only loss for honest BPB
+            loss_val = _get_recon_loss(model, loss)
             total_loss += loss_val
             n_steps += 1
 
@@ -127,20 +144,21 @@ def analyze_segments(model, data, config, device):
     Visualize what the hierarchical segmenter actually learns.
     Shows example segmentations at each level.
     """
-    if not hasattr(model, 'hierarchy'):
+    m = _unwrap(model)
+    if not hasattr(m, 'hierarchy'):
         print("  (Baseline model — no segmentation)")
         return
     
-    model.eval()
+    m.eval()
     block_size = config.get('block_size', 1024)
     
     # Get a sample
     x = data[:block_size].unsqueeze(0).to(device)
     
     with torch.no_grad():
-        h_bytes = model.encoder(x)
+        h_bytes = m.encoder(x)
         level_segments, level_boundaries, level_segment_ids, _ = \
-            model.hierarchy(h_bytes, temp=0.1, hard=True)
+            m.hierarchy(h_bytes, temp=0.1, hard=True)
     
     # Decode bytes for display
     byte_text = bytes(x[0].cpu().tolist()).decode('utf-8', errors='replace')[:200]
@@ -154,7 +172,7 @@ def analyze_segments(model, data, config, device):
         avg_len = T_level / max(1, n_boundaries)
         print(f"  Level {level_idx}: {int(n_boundaries)} segments, avg {avg_len:.1f} units/segment")
     
-    model.train()
+    m.train()
 
 
 def run_benchmark(dataset_name: str, config_name: str = 'small'):
@@ -243,15 +261,15 @@ def run_benchmark(dataset_name: str, config_name: str = 'small'):
     
     # Segment analysis
     print(f"\n>>> SEGMENT ANALYSIS:")
-    m = cast_model._orig_mod if hasattr(cast_model, '_orig_mod') else cast_model
-    analyze_segments(m, test_data, config, device)
+    analyze_segments(cast_model, test_data, config, device)
     
     # Generation test
     print(f"\n>>> GENERATION TEST:")
     prompt = test_data[:config['block_size']].unsqueeze(0)
     for name, model in [("CAST-G", cast_model), ("Baseline", base_model)]:
         try:
-            generated = model.generate(prompt, max_new_tokens=100)
+            m = _unwrap(model)
+            generated = m.generate(prompt, max_new_tokens=100)
             new_tokens = generated[0, config['block_size']:]
             text = bytes(new_tokens.cpu().tolist()).decode('utf-8', errors='replace')
             print(f"  {name}: {text[:100]}")

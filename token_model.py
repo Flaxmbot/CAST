@@ -7,12 +7,16 @@ benchmarking (both use Flash/Memory-Efficient Attention when available).
 
 FIX from v2: Proper causal masking via is_causal=True instead of
 manual mask construction.
+
+FIX from v3.2: Returns 3-tuple (logits, loss, metrics) for interface
+compatibility with benchmarker. Added count_parameters() for consistent
+reporting.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 
 class BaselineBlock(nn.Module):
@@ -82,6 +86,7 @@ class TokenModel(nn.Module):
     ):
         super().__init__()
         self.d_model = d_model
+        self.n_layer = n_layer
         self.block_size = block_size
         
         # Embeddings
@@ -122,8 +127,36 @@ class TokenModel(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            # Store for benchmarker compatibility
+            self._last_recon_loss = loss.detach()
             
-        return logits, loss
+        # Return 3-tuple for interface compatibility with CAST-G
+        # metrics_tensor: [1, 4] — [recon_loss, 0, 0, 0]
+        if loss is not None:
+            metrics = torch.stack([
+                loss.detach(),
+                torch.tensor(0.0, device=idx.device),
+                torch.tensor(0.0, device=idx.device),
+                torch.tensor(0.0, device=idx.device),
+            ]).unsqueeze(0)
+        else:
+            metrics = torch.zeros(1, 4, device=idx.device)
+        
+        return logits, loss, metrics
+
+    def count_parameters(self) -> Dict[str, int]:
+        """Report parameter counts by component for consistent benchmarking."""
+        embed_params = sum(p.numel() for p in self.token_embedding.parameters()) + self.pos_emb.numel()
+        block_params = sum(p.numel() for p in self.blocks.parameters())
+        head_params = sum(p.numel() for p in self.head.parameters()) + sum(p.numel() for p in self.ln_f.parameters())
+        total = sum(p.numel() for p in self.parameters())
+        
+        return {
+            'embeddings': embed_params,
+            'transformer_blocks': block_params,
+            'head': head_params,
+            'total': total,
+        }
 
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int = 50, temp: float = 0.7):
@@ -131,7 +164,7 @@ class TokenModel(nn.Module):
         self.eval()
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:]
-            logits, _ = self.forward(idx_cond)
+            logits, _, _ = self.forward(idx_cond)
             logits = logits[:, -1, :] / temp
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)

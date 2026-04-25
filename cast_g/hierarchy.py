@@ -216,7 +216,7 @@ class HierarchicalSegmenter(nn.Module):
             
             # Compute segmentation loss
             seg_loss, seg_metrics = self.seg_losses[level](boundaries, mi_scores, current_T)
-            total_seg_loss = total_seg_loss + seg_loss + infonce_loss
+            total_seg_loss = total_seg_loss + seg_loss + 0.1 * infonce_loss
             
             # Store results
             level_segments.append(pooled)

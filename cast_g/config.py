@@ -2,7 +2,7 @@
 CAST-G Configuration — Scale Presets.
 
 Two standard configurations for research and development:
-- 'small': ~5M params — fast iteration, fits single T4 (16GB)
+- 'small': ~5-8M params — fast iteration, fits single T4 (16GB)
 - 'medium': ~50M params — serious experiments, needs 2x T4 via DataParallel
 """
 
@@ -25,10 +25,13 @@ CONFIGS = {
         'global_n_layer': 4,
         'mod_capacity': 0.5,  # MoD: 50% of segments get full compute
         
-        # Decoder
-        'decoder_expansion': 8,
-        'decoder_n_layer': 2,
-        'decoder_n_head': 4,
+        # Decoder (O(T) causal convolutions)
+        'decoder_n_layer': 3,
+        'decoder_kernel_size': 8,  # 8-byte local context window
+        
+        # Loss weighting (CRITICAL for training stability)
+        'seg_loss_weight': 0.01,    # Segmentation loss weight relative to reconstruction
+        'aux_warmup_steps': 200,    # Steps of reconstruction-only training before aux kicks in
         
         # Training
         'block_size': 1024,
@@ -55,9 +58,13 @@ CONFIGS = {
         'global_n_layer': 8,
         'mod_capacity': 0.6,
         
-        'decoder_expansion': 8,
-        'decoder_n_layer': 3,
-        'decoder_n_head': 8,
+        # Decoder (O(T) causal convolutions)
+        'decoder_n_layer': 4,
+        'decoder_kernel_size': 12,  # 12-byte local context window
+        
+        # Loss weighting
+        'seg_loss_weight': 0.01,
+        'aux_warmup_steps': 500,
         
         'block_size': 1024,
         'batch_size': 16,

@@ -235,8 +235,14 @@ class MoDTransformerStack(nn.Module):
             # 1. Route: Select top-k segments
             selected, topk_indices, scores = router(x)
             
+            # 1b. SORT by original position for causal correctness
+            # Without this, is_causal=True creates a mask based on position in
+            # the selected tensor, NOT original sequence order — breaking causality
+            sorted_order = topk_indices.argsort(dim=1)
+            topk_indices = topk_indices.gather(1, sorted_order)
+            selected = selected.gather(1, sorted_order.unsqueeze(-1).expand(-1, -1, D))
+            
             # 2. Process: Selected segments through Transformer block
-            # (Self-attention within the selected subset is still causal relative to original order)
             h_selected = transformer(selected)
             
             # 3. Update: Scatter processed segments back to original positions (residual)

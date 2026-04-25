@@ -209,22 +209,15 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         xb, yb = get_batch(data, batch_size=batch_size, block_size=block_size, device=device)
         
         with torch.amp.autocast('cuda'):
-            if is_cast:
-                logits, loss, metrics_vec = model(xb, yb, step=step)
-            else:
-                logits, loss = model(xb, yb)
-                metrics_vec = None
+            logits, loss, metrics_vec = model(xb, yb, step=step)
         
         optimizer.zero_grad()
         actual_loss = loss.mean()  # mean() for DataParallel multi-GPU
         scaler.scale(actual_loss).backward()
         
         # Aggregate metrics across GPUs for logging
-        if metrics_vec is not None:
-            # metrics_vec: [num_gpus, 4] -> [4]
-            avg_metrics = metrics_vec.mean(dim=0).detach()
-        else:
-            avg_metrics = None
+        # metrics_vec: [num_gpus, 4] -> [4]
+        avg_metrics = metrics_vec.mean(dim=0).detach()
         
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -232,13 +225,12 @@ def _train_loop(model, data, steps, device, save_path, batch_size, config, is_ca
         scaler.update()
         
         if step % 100 == 0:
-            if is_cast and avg_metrics is not None:
-                recon_l, seg_l, mod_l, s_len = avg_metrics.tolist()
-                bpb = recon_l / 0.6931472
+            recon_l, seg_l, mod_l, s_len = avg_metrics.tolist()
+            bpb = recon_l / 0.6931472
+            if is_cast:
                 log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
                 log_str += f" [R:{recon_l:.2f} S:{seg_l:.2f} M:{mod_l:.2f} L:{s_len:.1f}b]"
             else:
-                bpb = actual_loss.item() / 0.6931472
                 log_str = f"  Step {step:5d}/{steps} | Loss: {actual_loss.item():.4f} | BPB: {bpb:.4f}"
             
             print(log_str)

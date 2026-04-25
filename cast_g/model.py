@@ -23,6 +23,15 @@ FIXES from v2:
 - Removed non-functional Triton stubs
 - Real segment pooling kernels
 - Proper Flash/Memory-Efficient Attention dispatch
+
+FIXES from v3.2:
+- Loss weighting: aux losses (seg+MoD) were 3-5x larger than reconstruction,
+  drowning out the learning signal. Now weighted by 0.01.
+- Aux loss warmup: segmentation loss disabled for first 200 steps so the
+  encoder/decoder can establish basic byte-prediction before boundaries kick in.
+- Metric key fix: avg_seg_len was always 0 due to key mismatch.
+- Decoder: O(T²) attention replaced with O(T) causal convolutions.
+- MoD: selected indices now sorted for proper causal ordering.
 """
 import torch
 import torch.nn as nn
@@ -91,12 +100,21 @@ class CASTGModel(nn.Module):
             dropout=dropout,
         )
         
-        # 4. Causal Local Decoder (Autoregressive byte prediction)
-        self.decoder = CausalLocalDecoder(d_model, dropout=dropout)
+        # 4. Causal Local Decoder (O(T) convolutions, NOT O(T²) attention)
+        self.decoder = CausalLocalDecoder(
+            d_model,
+            n_layers=config.get('decoder_n_layer', 3),
+            kernel_size=config.get('decoder_kernel_size', 8),
+            dropout=dropout,
+        )
 
         
         # 5. Global Start Token (for causality shift)
         self.start_seg = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        
+        # Loss weighting config
+        self.seg_loss_weight = config.get('seg_loss_weight', 0.01)
+        self.aux_warmup_steps = config.get('aux_warmup_steps', 200)
         
         # Training state
         self.register_buffer('step_count', torch.tensor(0, dtype=torch.long))
@@ -139,8 +157,6 @@ class CASTGModel(nn.Module):
         Full forward pass: bytes -> logits, loss, metrics_tensor.
         """
 
-        metrics = {}
-
         B, T = idx.shape
         T_encoded = T // 4
         
@@ -165,33 +181,49 @@ class CASTGModel(nn.Module):
         B_g, S_g, D_g = h_global.shape
         h_shifted = torch.cat([self.start_seg.expand(B_g, -1, -1), h_global[:, :-1, :]], dim=1)
         
-        # 5. Causal Local Decoding (Autoregressive)
+        # 5. Causal Local Decoding (O(T) convolutions)
         # Combines segment context with shifted input bytes
         logits = self.decoder(h_shifted, fine_segment_ids, T_encoded, T, idx)
         
         # 6. Loss Calculation
         loss = None
         if targets is not None:
-            # Reconstruction Loss (Primary)
+            # Reconstruction Loss (Primary — this drives learning)
             loss_recon = F.cross_entropy(logits.view(-1, 256), targets.view(-1))
+            
+            # Store for external access (benchmarker)
+            self._last_recon_loss = loss_recon.detach()
             
             # Auxiliary Losses (Segmentation & MoD)
             loss_seg = seg_metrics.get('total_seg_loss', torch.tensor(0.0, device=idx.device))
             loss_mod = mod_metrics.get('mod_aux_loss', torch.tensor(0.0, device=idx.device))
             
-            # Total Loss
-            loss = loss_recon + loss_seg + loss_mod
+            # Determine current step for warmup
+            current_step = step if step is not None else self.step_count.item()
+            
+            # Auxiliary loss warmup: let encoder/decoder learn basic prediction
+            # before introducing segmentation pressure
+            if current_step < self.aux_warmup_steps:
+                # During warmup: only reconstruction loss
+                loss = loss_recon
+            else:
+                # After warmup: reconstruction + weighted auxiliaries
+                # seg_loss_weight=0.01 ensures reconstruction always dominates
+                loss = loss_recon + self.seg_loss_weight * loss_seg + loss_mod
 
             
             # Record metrics for gathering
-            avg_seg_len = seg_metrics.get('avg_seg_len', torch.tensor(0.0, device=idx.device))
+            # Fix: use correct key from hierarchy metrics dict
+            avg_seg_len = seg_metrics.get('level0_avg_seg_len', torch.tensor(0.0, device=idx.device))
+            if isinstance(avg_seg_len, (int, float)):
+                avg_seg_len = torch.tensor(avg_seg_len, device=idx.device, dtype=torch.float32)
             
             # metrics_tensor: [1, 4] (extra dim for DataParallel gathering)
             metrics_tensor = torch.stack([
                 loss_recon.detach(),
                 loss_seg.detach(),
                 loss_mod.detach(),
-                avg_seg_len.detach()
+                avg_seg_len.detach() if isinstance(avg_seg_len, torch.Tensor) else torch.tensor(avg_seg_len, device=idx.device)
             ]).unsqueeze(0)
 
 

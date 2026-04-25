@@ -121,7 +121,7 @@ class MIBoundaryDetector(nn.Module):
         if self.training:
             B, T, D = left_ctx.shape
             # [B, T, D] @ [B, D, T] -> [B, T, T]
-            logits = torch.matmul(left_ctx, right_ctx.transpose(1, 2)) / 0.07
+            logits = torch.matmul(left_ctx, right_ctx.transpose(1, 2)) / 0.1
             labels = torch.arange(T, device=h.device).repeat(B)
             infonce_loss = F.cross_entropy(logits.view(-1, T), labels)
         else:
@@ -204,7 +204,7 @@ class AdaptiveLagrangian(nn.Module):
     @property
     def lam(self) -> torch.Tensor:
         # Tight clamp: max λ ≈ 1.65 — seg loss can never exceed ~1.65x violation
-        return torch.exp(self.log_lambda).clamp(min=1e-4, max=2.0)
+        return torch.exp(self.log_lambda).clamp(min=1e-4, max=0.5)
     
     def forward(self, boundaries: torch.Tensor, total_bytes: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -240,7 +240,7 @@ class AdaptiveLagrangian(nn.Module):
                 # Signed update: positive violation → increase λ, negative → decrease
                 self.log_lambda.add_(self.lambda_lr * violation.detach())
                 # Tight clamp: [-5, 0.5] → λ in [0.007, 1.65]
-                self.log_lambda.clamp_(-5.0, 0.5)
+                self.log_lambda.clamp_(-5.0, -0.7)
         
         return penalty, avg_len
 
